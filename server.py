@@ -2443,6 +2443,7 @@ def process_video_to_job(
     batch_green_desaturate: bool = False,
     batch_semitransparent_to_black: bool = False,
     batch_semitransparent_to_opaque: bool = False,
+    production_context: dict | None = None,
 ) -> dict:
     source_path, media_type = source_media_entry(upload_id)
     info = upload_media_info(upload_id, source_path, media_type)
@@ -2625,6 +2626,8 @@ def process_video_to_job(
         "frame_count": len(frame_entries),
         "frames": frame_entries,
     }
+    if production_context:
+        manifest["production_context"] = production_context
     save_job_manifest(job_id, manifest)
     return manifest
 
@@ -4452,6 +4455,11 @@ class AppHandler(BaseHTTPRequestHandler):
                     batch_green_desaturate=bool(payload.get("batch_green_desaturate", False)),
                     batch_semitransparent_to_black=bool(payload.get("batch_semitransparent_to_black", False)),
                     batch_semitransparent_to_opaque=bool(payload.get("batch_semitransparent_to_opaque", False)),
+                    production_context={
+                        key: str(payload.get(key)).strip()
+                        for key in ("production_id", "scene_id", "shot_id", "shot_version_id")
+                        if payload_has_value(payload, key)
+                    } or None,
                 )
                 self.send_json({"ok": True, "job": result})
                 return
