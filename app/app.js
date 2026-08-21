@@ -1106,6 +1106,10 @@ function matteModeUsesChromaSeed(mode, corridorkeyCoarseMask = els.corridorCoars
   return mode === "chroma" || (mode === "corridorkey" && corridorkeyCoarseMask !== "birefnet");
 }
 
+function matteThresholdStorageMode(mode, corridorkeyCoarseMask = els.corridorCoarseMaskInput.value) {
+  return matteModeUsesChromaSeed(mode, corridorkeyCoarseMask) ? "chroma" : mode;
+}
+
 function matteModeRequiresAiModel(mode) {
   return matteModeUsesBiRefNet(mode) || matteModeUsesCorridorKey(mode);
 }
@@ -1198,11 +1202,13 @@ async function handleMatteModeChange() {
 async function handleCorridorCoarseMaskChange() {
   els.corridorCoarseMaskInput.value =
     els.corridorCoarseMaskInput.value === "birefnet" ? "birefnet" : "chroma";
+  applyMatteThreshold("corridorkey");
   updateChromaVisibility();
   els.corridorCoarseMaskInput.disabled = true;
   const ready = await ensureAiModelsReady("corridorkey");
   if (!ready) {
     els.corridorCoarseMaskInput.value = "chroma";
+    applyMatteThreshold("corridorkey");
     updateChromaVisibility();
   }
   els.corridorCoarseMaskInput.disabled = false;
@@ -1362,7 +1368,7 @@ function collectFormState() {
 
 function collectProcessingPayload() {
   const matteMode = currentMatteMode();
-  const usesUserChromaSettings = matteMode === "chroma";
+  const usesUserChromaSettings = matteModeUsesChromaSeed(matteMode);
   const usesChromaGuideTolerance = matteMode === "chroma" || matteMode === "corridorkey";
   return {
     upload_id: state.upload?.upload_id || "",
@@ -1380,7 +1386,7 @@ function collectProcessingPayload() {
     manual_key_hex: els.manualKeyInput.value,
     manual_key_colors: usesUserChromaSettings ? [...state.manualKeyColors] : [],
     threshold: usesChromaGuideTolerance
-      ? Number(els.thresholdInput.value || 0)
+      ? Number(state.matteThresholds.chroma ?? MATTE_THRESHOLD_DEFAULTS.chroma)
       : MATTE_THRESHOLD_DEFAULTS.chroma,
     softness: Number(els.softnessInput.value === "" ? 1 : els.softnessInput.value),
     despill_strength: Number(els.despillInput.value || 0),
@@ -3871,7 +3877,7 @@ function updateChromaVisibility() {
   });
   els.thresholdInput.setAttribute(
     "aria-label",
-    corridorUsesChroma ? "CorridorKey Chroma 粗遮罩容差" : "Chroma 背景色容差"
+    corridorUsesChroma ? "CorridorKey 继承的 Chroma 容差" : "Chroma 背景色容差"
   );
   document.querySelectorAll(".spill-matte-only").forEach((node) => {
     node.style.display = usesSpillControls ? "" : "none";
@@ -4055,17 +4061,19 @@ function syncChromaToleranceLabel() {
 }
 
 function rememberMatteThreshold(mode) {
-  if (!(mode in MATTE_THRESHOLD_DEFAULTS)) {
+  const storageMode = matteThresholdStorageMode(mode);
+  if (!(storageMode in MATTE_THRESHOLD_DEFAULTS)) {
     return;
   }
-  state.matteThresholds[mode] = clamp(Number(els.thresholdInput.value || 0), 0, 180);
+  state.matteThresholds[storageMode] = clamp(Number(els.thresholdInput.value || 0), 0, 180);
 }
 
 function applyMatteThreshold(mode) {
-  if (!(mode in MATTE_THRESHOLD_DEFAULTS)) {
+  const storageMode = matteThresholdStorageMode(mode);
+  if (!(storageMode in MATTE_THRESHOLD_DEFAULTS)) {
     return;
   }
-  const value = state.matteThresholds[mode] ?? MATTE_THRESHOLD_DEFAULTS[mode];
+  const value = state.matteThresholds[storageMode] ?? MATTE_THRESHOLD_DEFAULTS[storageMode];
   els.thresholdInput.value = String(clamp(Number(value), 0, 180));
   syncChromaToleranceLabel();
 }
@@ -4287,11 +4295,11 @@ function clearInstantChromaPreviewForEmptySamples() {
 
 function validateManualChromaSamples() {
   if (
-    currentMatteMode() === "chroma"
+    matteModeUsesChromaSeed(currentMatteMode())
     && els.keyModeInput.value === "manual"
     && state.manualKeyColors.length === 0
   ) {
-    setStatus("手动指定背景色时，请先从画面或色板添加至少一个色样。", "error");
+    setStatus("手动指定背景色时，请先在 Chroma 中从画面或色板添加至少一个色样。", "error");
     return false;
   }
   return true;

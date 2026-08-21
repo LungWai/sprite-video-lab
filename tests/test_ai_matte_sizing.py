@@ -203,6 +203,56 @@ class AiMatteSizingTests(unittest.TestCase):
         self.assertEqual(observed["options"]["refiner_scale"], 1.5)
         self.assertTrue(info["corridorkey_enabled"])
 
+    def test_corridorkey_chroma_coarse_mask_uses_all_manual_colors_and_threshold(self):
+        raw = Image.new("RGBA", (3, 1))
+        raw.putdata(
+            [
+                (16, 200, 80, 255),
+                (20, 184, 92, 255),
+                (230, 140, 40, 255),
+            ]
+        )
+        observed = {}
+
+        def fake_corridor(image, alpha, _device, _screen, _options):
+            observed["alpha"] = list(alpha.getdata())
+            return server.apply_alpha_mask(image, alpha), {
+                "corridorkey_enabled": True,
+                "corridorkey_screen_color": "green",
+            }
+
+        with (
+            mock.patch.object(server, "chroma_key_frame", wraps=server.chroma_key_frame) as chroma,
+            mock.patch.object(server, "corridorkey_refine_frame", side_effect=fake_corridor),
+        ):
+            server.apply_matte_pipeline(
+                raw_images=[raw],
+                chroma_enabled=True,
+                matte_mode="corridorkey",
+                key_mode="manual",
+                manual_key_hex="#10C850",
+                manual_key_colors=["#10C850", "#14B85C"],
+                threshold=4,
+                softness=0,
+                despill_strength=0.6,
+                halo_pixels=0,
+                ai_model="birefnet-hr-matting",
+                ai_device="cpu",
+                ai_resolution=1024,
+                luma_black=0,
+                luma_white=85,
+                luma_gamma=0.55,
+                luma_strength=1.7,
+                luma_polarity="auto",
+                corridorkey_enabled=True,
+                corridorkey_screen="green",
+                corridorkey_coarse_mask="chroma",
+            )
+
+        self.assertEqual(observed["alpha"], [0, 0, 255])
+        self.assertEqual(chroma.call_args.kwargs["key_rgbs"], [(16, 200, 80), (20, 184, 92)])
+        self.assertEqual(chroma.call_args.kwargs["threshold"], 4)
+
     def test_corridorkey_can_use_birefnet_as_its_coarse_mask(self):
         raw = Image.new("RGBA", (2, 1), (20, 180, 60, 255))
         biref_alpha = Image.new("L", raw.size)
