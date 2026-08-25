@@ -224,7 +224,7 @@
                           <div><dt>Chroma</dt><dd>绿幕、蓝幕、白底、灰底等受控纯色背景，速度最快。</dd></div>
                           <div><dt>Luma</dt><dd>黑底或白底的火焰、闪电、粒子和亮部 VFX。</dd></div>
                           <div><dt>BiRefNet</dt><dd>真实背景或 AI 生成背景，主体轮廓明确时使用。</dd></div>
-                          <div><dt>CorridorKey</dt><dd>标准绿幕，使用 EZ-CorridorKey 重建前景、细化遮罩并去除幕布溢色；蓝幕请使用 Chroma。</dd></div>
+                          <div><dt>CorridorKey</dt><dd>标准绿幕或蓝幕，分别使用对应的 EZ-CorridorKey 模型重建前景、细化遮罩并去除幕布溢色。</dd></div>
                           <div><dt>不抠图</dt><dd>保留原始画面，只执行后续尺寸与批处理。</dd></div>
                         </dl>
                       </section>
@@ -250,6 +250,7 @@
                         <option value="luma">Luma</option>
                         <option value="birefnet">BiRefNet</option>
                         <option value="corridorkey">CorridorKey</option>
+                        <option value="corridorkey_blue">CorridorKey（蓝幕）</option>
                         <option value="none">不抠图</option>
                       </select>
                       <small>选处理方式即可，细节由程序自动处理。</small>
@@ -334,6 +335,7 @@
                       <span>幕布颜色</span>
                       <select id="corridorScreenInput">
                         <option value="green" selected>绿色</option>
+                        <option value="blue">蓝色</option>
                       </select>
                     </label>
 
@@ -471,6 +473,10 @@
                     <label id="aiLivePreviewOption" class="ai-live-preview-option" hidden>
                       <input id="aiLivePreviewInput" type="checkbox">
                       <span>即时预览</span>
+                    </label>
+                    <label class="ai-live-preview-option">
+                      <input id="watermarkRemovalInput" type="checkbox">
+                      <span>去水印</span>
                     </label>
                     <button id="previewFrameButton" class="primary-button" type="button">预览当前帧</button>
                     <button id="processButton" class="primary-button large" type="button">开始处理区间</button>

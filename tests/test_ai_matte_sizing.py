@@ -11,8 +11,36 @@ import server
 
 
 class AiMatteSizingTests(unittest.TestCase):
+    def test_watermark_removal_detects_each_corner_and_keeps_canvas_size(self):
+        source = Image.new("RGBA", (100, 80), (0, 255, 0, 255))
+        for y in range(3, 10):
+            for x in range(6, 19):
+                source.putpixel((x, y), (150, 255, 150, 255))
+        processed = Image.new("RGBA", source.size, (220, 80, 40, 255))
+
+        cleaned_frames, info = server.remove_detected_watermarks([source], [processed])
+
+        self.assertEqual(info["locations"], ["top_left"])
+        self.assertEqual(info["removed_frames"], 1)
+        self.assertEqual(cleaned_frames[0].size, source.size)
+        self.assertEqual(cleaned_frames[0].getpixel((8, 5)), (0, 0, 0, 0))
+        self.assertEqual(cleaned_frames[0].getpixel((50, 40)), (220, 80, 40, 255))
+
+        source = Image.new("RGBA", (100, 80), (0, 255, 0, 255))
+        for y in range(72, 79):
+            for x in range(86, 99):
+                source.putpixel((x, y), (150, 255, 150, 255))
+        location, _scores = server.detect_watermark_corner(source)
+        self.assertEqual(location, "bottom_right")
+
+    def test_watermark_removal_skips_frames_without_corner_contrast(self):
+        source = Image.new("RGBA", (100, 80), (0, 255, 0, 255))
+        self.assertEqual(server.detect_watermark_corner(source)[0], None)
+
     def test_corridorkey_mode_only_requires_corridorkey(self):
         self.assertEqual(server.normalize_matte_mode("corridorkey", True), "corridorkey")
+        self.assertEqual(server.normalize_matte_mode("corridorkey_green", True), "corridorkey")
+        self.assertEqual(server.normalize_matte_mode("corridorkey_blue", True), "corridorkey")
         self.assertEqual(server.ai_components_for_matte_mode("corridorkey"), ["corridorkey"])
 
     def test_corridorkey_with_birefnet_coarse_mask_requires_both_models(self):
@@ -141,6 +169,28 @@ class AiMatteSizingTests(unittest.TestCase):
         )
 
         self.assertEqual(list(result.getchannel("A").getdata()), [0, 0, 255])
+
+    def test_chroma_key_only_reduces_existing_transparent_input_alpha(self):
+        image = Image.new("RGBA", (4, 1))
+        image.putdata(
+            [
+                (0, 0, 0, 0),
+                (255, 0, 0, 128),
+                (0, 0, 255, 255),
+                (255, 0, 0, 255),
+            ]
+        )
+
+        result = server.chroma_key_frame(
+            image=image,
+            key_rgb=(0, 0, 255),
+            threshold=10,
+            softness=0,
+            despill_strength=0,
+            halo_pixels=0,
+        )
+
+        self.assertEqual(list(result.getchannel("A").getdata()), [0, 128, 0, 255])
 
     def test_standalone_corridorkey_uses_ez_foreground_without_birefnet(self):
         raw = Image.new("RGBA", (2, 1))
@@ -488,7 +538,7 @@ class AiMatteSizingTests(unittest.TestCase):
 
         require_runtime.assert_not_called()
 
-    def test_ai_model_install_only_installs_corridorkey_for_corridorkey_mode(self):
+    def test_ai_model_install_installs_selected_corridorkey_screen(self):
         completed_status = {"installed": True}
         with (
             mock.patch.object(server, "require_ai_runtime_for_components") as require_runtime,
@@ -500,18 +550,41 @@ class AiMatteSizingTests(unittest.TestCase):
                 True,
                 "corridorkey",
                 "birefnet-hr-matting",
+                "chroma",
+                "blue",
             )
 
         require_runtime.assert_called_once_with(["corridorkey"])
         download_birefnet.assert_not_called()
         self.assertEqual(
             download_corridorkey.call_args_list,
-            [mock.call("green")],
+            [mock.call("blue")],
         )
         self.assertEqual(
             result["installed_models"],
-            ["corridorkey-green"],
+            ["corridorkey-blue"],
         )
+
+    def test_ai_model_status_checks_selected_corridorkey_screen(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corridor_root = Path(temp_dir)
+            (corridor_root / "CorridorKeyModule").mkdir()
+            with (
+                mock.patch.object(server, "default_corridorkey_root", return_value=corridor_root),
+                mock.patch.object(server, "missing_ai_dependency_names", return_value=[]),
+                mock.patch.object(server, "corridorkey_checkpoint_is_cached", return_value=True) as cached,
+            ):
+                status = server.ai_model_install_status(
+                    "corridorkey",
+                    "birefnet-hr-matting",
+                    "chroma",
+                    "blue",
+                )
+
+        cached.assert_called_once_with("blue")
+        self.assertTrue(status["installed"])
+        self.assertEqual(status["models"]["corridorkey-blue"], True)
+        self.assertNotIn("corridorkey-green", status["models"])
 
     def test_ai_model_install_adds_hr_matting_for_corridorkey_birefnet_coarse_mask(self):
         completed_status = {"installed": True}
@@ -567,15 +640,15 @@ class AiMatteSizingTests(unittest.TestCase):
             allow_patterns=list(server.BIREFNET_REQUIRED_FILES),
         )
 
-    def test_corridorkey_download_only_fetches_pinned_green_checkpoint(self):
+    def test_corridorkey_download_fetches_pinned_selected_checkpoint(self):
         with (
             mock.patch.object(server, "default_corridorkey_root", return_value=Path("corridor-root")),
             mock.patch("huggingface_hub.hf_hub_download") as hf_hub_download,
         ):
             result = server.download_corridorkey_checkpoint("blue")
 
-        repo_id, filename, revision = server.CORRIDORKEY_TORCH_CHECKPOINTS["green"]
-        self.assertEqual(result, "green")
+        repo_id, filename, revision = server.CORRIDORKEY_TORCH_CHECKPOINTS["blue"]
+        self.assertEqual(result, "blue")
         hf_hub_download.assert_called_once_with(
             repo_id=repo_id,
             filename=filename,
@@ -583,11 +656,11 @@ class AiMatteSizingTests(unittest.TestCase):
             local_dir=str(Path("corridor-root") / "CorridorKeyModule" / "checkpoints"),
         )
 
-    def test_legacy_model_and_corridor_color_values_migrate_to_supported_models(self):
+    def test_model_and_corridor_color_values_normalize_to_supported_models(self):
         self.assertEqual(server.normalize_ai_model_key("general"), "birefnet-hr-matting")
         self.assertEqual(server.normalize_ai_model_key("lite-2k"), "birefnet-hr-matting")
         self.assertEqual(server.normalize_corridorkey_screen("auto"), "green")
-        self.assertEqual(server.normalize_corridorkey_screen("blue"), "green")
+        self.assertEqual(server.normalize_corridorkey_screen("blue"), "blue")
 
     def test_non_ai_matte_mode_never_starts_installation(self):
         with mock.patch.object(server, "require_ai_runtime_for_components") as require_runtime:

@@ -249,6 +249,7 @@ function bindElements() {
     "preprocessEsrSmoothingInput",
     "aiLivePreviewOption",
     "aiLivePreviewInput",
+    "watermarkRemovalInput",
     "previewFrameButton",
     "savePreviewButton",
     "processPreviewTimeLabel",
@@ -770,6 +771,7 @@ function bindEvents() {
     els.batchSemiTransparentToBlackInput,
     els.batchSemiTransparentToOpaqueInput,
     els.aiLivePreviewInput,
+    els.watermarkRemovalInput,
     els.startInput,
     els.endInput,
   ].forEach((element) => {
@@ -1095,7 +1097,21 @@ function matteModeUsesBiRefNet(mode) {
 }
 
 function matteModeUsesCorridorKey(mode) {
-  return mode === "corridorkey";
+  return mode === "corridorkey" || mode === "corridorkey_blue";
+}
+
+function corridorScreenForMatteMode(mode) {
+  return mode === "corridorkey_blue" ? "blue" : "green";
+}
+
+function processingMatteMode(mode) {
+  return matteModeUsesCorridorKey(mode) ? "corridorkey" : mode;
+}
+
+function syncCorridorScreenFromMatteMode(mode) {
+  if (matteModeUsesCorridorKey(mode)) {
+    els.corridorScreenInput.value = corridorScreenForMatteMode(mode);
+  }
 }
 
 function matteModeUsesLuma(mode) {
@@ -1103,11 +1119,11 @@ function matteModeUsesLuma(mode) {
 }
 
 function matteModeUsesChromaSeed(mode, corridorkeyCoarseMask = els.corridorCoarseMaskInput.value) {
-  return mode === "chroma" || (mode === "corridorkey" && corridorkeyCoarseMask !== "birefnet");
+  return mode === "chroma" || (matteModeUsesCorridorKey(mode) && corridorkeyCoarseMask !== "birefnet");
 }
 
 function matteThresholdStorageMode(mode, corridorkeyCoarseMask = els.corridorCoarseMaskInput.value) {
-  return matteModeUsesChromaSeed(mode, corridorkeyCoarseMask) ? "chroma" : mode;
+  return matteModeUsesChromaSeed(mode, corridorkeyCoarseMask) ? "chroma" : processingMatteMode(mode);
 }
 
 function matteModeRequiresAiModel(mode) {
@@ -1116,10 +1132,11 @@ function matteModeRequiresAiModel(mode) {
 
 function aiModelRequestPayload(mode) {
   return {
-    matte_mode: mode,
+    matte_mode: processingMatteMode(mode),
     ai_model: els.aiModelInput.value,
     ai_device: els.aiDeviceInput.value,
     corridorkey_coarse_mask: els.corridorCoarseMaskInput.value,
+    corridorkey_screen: els.corridorScreenInput.value,
   };
 }
 
@@ -1176,6 +1193,7 @@ async function ensureAiModelsReady(mode) {
 async function handleMatteModeChange() {
   const selectedMode = els.matteModeInput.value || "chroma";
   rememberMatteThreshold(lastAcceptedMatteMode);
+  syncCorridorScreenFromMatteMode(selectedMode);
   applyMatteThreshold(selectedMode);
   updateChromaVisibility();
   els.matteModeInput.disabled = true;
@@ -1184,7 +1202,7 @@ async function handleMatteModeChange() {
     lastAcceptedMatteMode = selectedMode;
     persistSession();
     if (state.upload) {
-      if (selectedMode === "corridorkey") {
+      if (matteModeUsesCorridorKey(selectedMode)) {
         scheduleCorridorLivePreview(0);
       } else if (selectedMode === "birefnet") {
         scheduleBirefnetLivePreview(0);
@@ -1192,6 +1210,7 @@ async function handleMatteModeChange() {
     }
   } else {
     els.matteModeInput.value = lastAcceptedMatteMode;
+    syncCorridorScreenFromMatteMode(lastAcceptedMatteMode);
     applyMatteThreshold(lastAcceptedMatteMode);
     updateChromaVisibility();
     persistSession();
@@ -1202,13 +1221,13 @@ async function handleMatteModeChange() {
 async function handleCorridorCoarseMaskChange() {
   els.corridorCoarseMaskInput.value =
     els.corridorCoarseMaskInput.value === "birefnet" ? "birefnet" : "chroma";
-  applyMatteThreshold("corridorkey");
+  applyMatteThreshold(currentMatteMode());
   updateChromaVisibility();
   els.corridorCoarseMaskInput.disabled = true;
-  const ready = await ensureAiModelsReady("corridorkey");
+  const ready = await ensureAiModelsReady(currentMatteMode());
   if (!ready) {
     els.corridorCoarseMaskInput.value = "chroma";
-    applyMatteThreshold("corridorkey");
+    applyMatteThreshold(currentMatteMode());
     updateChromaVisibility();
   }
   els.corridorCoarseMaskInput.disabled = false;
@@ -1235,7 +1254,7 @@ function handleAiLivePreviewToggle() {
   if (!aiLivePreviewEnabled() || !state.upload) {
     return;
   }
-  if (currentMatteMode() === "corridorkey") {
+  if (matteModeUsesCorridorKey(currentMatteMode())) {
     scheduleCorridorLivePreview(0);
   } else if (currentMatteMode() === "birefnet") {
     scheduleBirefnetLivePreview(0);
@@ -1297,6 +1316,7 @@ function applyAutomaticMatteDefaults() {
 
 function collectFormState() {
   rememberMatteThreshold(currentMatteMode());
+  syncCorridorScreenFromMatteMode(currentMatteMode());
   return {
     keep_every: Number(els.keepEveryInput.value || 1),
     output_scale: 1,
@@ -1318,7 +1338,7 @@ function collectFormState() {
     birefnet_edge_shrink: 0,
     corridorkey_enabled: currentUsesCorridorKey(),
     corridorkey_coarse_mask: els.corridorCoarseMaskInput.value,
-    corridorkey_screen: "green",
+    corridorkey_screen: els.corridorScreenInput.value,
     corridorkey_color_space: "srgb",
     corridorkey_despill_strength: Number(els.corridorDespillInput.value || 0),
     corridorkey_refiner_scale: Number(els.corridorRefinerInput.value || 0),
@@ -1338,6 +1358,7 @@ function collectFormState() {
     luma_polarity: els.lumaPolarityInput.value || "auto",
     preprocess_esr_smoothing: els.preprocessEsrSmoothingInput.checked,
     ai_live_preview: els.aiLivePreviewInput.checked,
+    watermark_removal: els.watermarkRemovalInput.checked,
     batch_background_to_black: els.batchBackgroundToBlackInput.checked,
     batch_background_desaturate: els.batchBackgroundDesaturateInput.checked,
     batch_semitransparent_to_black: els.batchSemiTransparentToBlackInput.checked,
@@ -1368,8 +1389,9 @@ function collectFormState() {
 
 function collectProcessingPayload() {
   const matteMode = currentMatteMode();
+  syncCorridorScreenFromMatteMode(matteMode);
   const usesUserChromaSettings = matteModeUsesChromaSeed(matteMode);
-  const usesChromaGuideTolerance = matteMode === "chroma" || matteMode === "corridorkey";
+  const usesChromaGuideTolerance = matteMode === "chroma" || matteModeUsesCorridorKey(matteMode);
   return {
     upload_id: state.upload?.upload_id || "",
     start_time: state.segment.start,
@@ -1381,7 +1403,7 @@ function collectProcessingPayload() {
     canvas_mode: "auto",
     reduce_px: 0,
     chroma_enabled: true,
-    matte_mode: currentMatteMode(),
+    matte_mode: processingMatteMode(matteMode),
     key_mode: usesUserChromaSettings ? els.keyModeInput.value : "auto",
     manual_key_hex: els.manualKeyInput.value,
     manual_key_colors: usesUserChromaSettings ? [...state.manualKeyColors] : [],
@@ -1394,7 +1416,7 @@ function collectProcessingPayload() {
     birefnet_edge_shrink: 0,
     corridorkey_enabled: currentUsesCorridorKey(),
     corridorkey_coarse_mask: els.corridorCoarseMaskInput.value,
-    corridorkey_screen: "green",
+    corridorkey_screen: els.corridorScreenInput.value,
     corridorkey_color_space: "srgb",
     corridorkey_despill_strength: Number(els.corridorDespillInput.value || 0),
     corridorkey_refiner_scale: Number(els.corridorRefinerInput.value || 0),
@@ -1411,6 +1433,7 @@ function collectProcessingPayload() {
     luma_strength: Number(els.lumaStrengthInput.value || 1.7),
     luma_polarity: els.lumaPolarityInput.value || "auto",
     preprocess_esr_smoothing: els.preprocessEsrSmoothingInput.checked,
+    watermark_removal: els.watermarkRemovalInput.checked,
     batch_background_to_black: els.batchBackgroundToBlackInput.checked,
     batch_background_desaturate: els.batchBackgroundDesaturateInput.checked,
     batch_semitransparent_to_black: els.batchSemiTransparentToBlackInput.checked,
@@ -1424,20 +1447,23 @@ function applyFormState(snapshot) {
   }
 
   if (snapshot.keep_every != null) els.keepEveryInput.value = String(snapshot.keep_every);
+  const storedCorridorMode = snapshot.corridorkey_screen === "blue" ? "corridorkey_blue" : "corridorkey";
   const legacyMatteModes = {
     chroma_birefnet: "chroma",
-    birefnet_corridorkey: "corridorkey",
-    birefnet_corridorkey_key: "corridorkey",
+    birefnet_corridorkey: storedCorridorMode,
+    birefnet_corridorkey_key: storedCorridorMode,
     birefnet_luma: "luma",
     birefnet_luma_key: "luma",
     birefnet_luma_corridorkey: "luma",
   };
-  const snapshotMatteMode = legacyMatteModes[snapshot.matte_mode] || snapshot.matte_mode;
+  const snapshotMatteMode = snapshot.matte_mode === "corridorkey"
+    ? storedCorridorMode
+    : legacyMatteModes[snapshot.matte_mode] || snapshot.matte_mode;
   if (snapshotMatteMode && [...els.matteModeInput.options].some((option) => option.value === snapshotMatteMode)) {
     els.matteModeInput.value = snapshotMatteMode;
   }
   if (snapshot.corridorkey_enabled && !matteModeUsesCorridorKey(els.matteModeInput.value)) {
-    els.matteModeInput.value = "corridorkey";
+    els.matteModeInput.value = storedCorridorMode;
   }
   if (snapshot.key_mode) els.keyModeInput.value = snapshot.key_mode;
   const storedManualColors = Array.isArray(snapshot.manual_key_colors)
@@ -1454,7 +1480,7 @@ function applyFormState(snapshot) {
   applyAutomaticMatteDefaults();
   if (snapshot.chroma_threshold != null) {
     state.matteThresholds.chroma = clamp(Number(snapshot.chroma_threshold), 0, 180);
-  } else if (snapshot.threshold != null && snapshotMatteMode !== "corridorkey") {
+  } else if (snapshot.threshold != null && !matteModeUsesCorridorKey(snapshotMatteMode)) {
     state.matteThresholds.chroma = clamp(Number(snapshot.threshold), 0, 180);
   }
   if (snapshot.corridorkey_threshold != null) {
@@ -1469,16 +1495,10 @@ function applyFormState(snapshot) {
   applyMatteThreshold(currentMatteMode());
   els.corridorEnabledInput.checked = currentUsesCorridorKey();
   els.corridorCoarseMaskInput.value = snapshot.corridorkey_coarse_mask === "birefnet" ? "birefnet" : "chroma";
-  if (
-    snapshot.corridorkey_screen &&
-    [...els.corridorScreenInput.options].some((option) => option.value === snapshot.corridorkey_screen)
-  ) {
-    els.corridorScreenInput.value = snapshot.corridorkey_screen;
-  }
+  syncCorridorScreenFromMatteMode(currentMatteMode());
   if (["srgb", "linear"].includes(snapshot.corridorkey_color_space)) {
     els.corridorColorSpaceInput.value = snapshot.corridorkey_color_space;
   }
-  els.corridorScreenInput.value = "green";
   els.corridorColorSpaceInput.value = "srgb";
   if (snapshot.corridorkey_despill_strength != null) {
     els.corridorDespillInput.value = String(clamp(Number(snapshot.corridorkey_despill_strength), 0, 1));
@@ -1516,6 +1536,7 @@ function applyFormState(snapshot) {
     els.preprocessEsrSmoothingInput.checked = Boolean(snapshot.preprocess_esr_smoothing);
   }
   els.aiLivePreviewInput.checked = Boolean(snapshot.ai_live_preview);
+  els.watermarkRemovalInput.checked = Boolean(snapshot.watermark_removal);
   const batchBackgroundToBlack = snapshot.batch_background_to_black ?? snapshot.batch_green_to_black;
   if (batchBackgroundToBlack != null) {
     els.batchBackgroundToBlackInput.checked = Boolean(batchBackgroundToBlack);
@@ -1858,6 +1879,7 @@ function formatMatteModeLabel(matte) {
   if (mode === "luma") label = "Luma";
   if (mode === "birefnet") label = "BiRefNet";
   if (mode === "corridorkey") label = "EZ CorridorKey";
+  if (mode === "corridorkey_blue") label = "EZ CorridorKey（蓝幕）";
   if (
     mode !== "none" &&
     !matteModeUsesCorridorKey(mode) &&
@@ -3850,6 +3872,7 @@ function formatFfmpegAccelLabel(ffmpegAccel) {
 
 function updateChromaVisibility() {
   const matteMode = currentMatteMode();
+  syncCorridorScreenFromMatteMode(matteMode);
   const chromaEnabled = matteMode !== "none";
   const isChroma = matteMode === "chroma";
   const isAi = chromaEnabled && matteModeUsesBiRefNet(matteMode);
@@ -4012,7 +4035,7 @@ function setCorridorPreviewState(nextState) {
 }
 
 function markCorridorPreviewStale() {
-  if (currentMatteMode() !== "corridorkey") {
+  if (!matteModeUsesCorridorKey(currentMatteMode())) {
     return;
   }
   const previewMode = state.processPreview?.matte?.mode || state.processPreview?.options?.matte_mode;
@@ -4020,7 +4043,7 @@ function markCorridorPreviewStale() {
 }
 
 function scheduleCorridorLivePreview(delay = 220) {
-  if (!aiLivePreviewEnabled() || currentMatteMode() !== "corridorkey" || !state.upload || preprocessSmoothingInstalling) {
+  if (!aiLivePreviewEnabled() || !matteModeUsesCorridorKey(currentMatteMode()) || !state.upload || preprocessSmoothingInstalling) {
     return;
   }
   window.clearTimeout(corridorPreviewTimerId);
@@ -4029,7 +4052,7 @@ function scheduleCorridorLivePreview(delay = 220) {
 
 async function runCorridorLivePreview() {
   corridorPreviewTimerId = null;
-  if (!aiLivePreviewEnabled() || currentMatteMode() !== "corridorkey" || !state.upload) {
+  if (!aiLivePreviewEnabled() || !matteModeUsesCorridorKey(currentMatteMode()) || !state.upload) {
     corridorPreviewPending = false;
     return;
   }
@@ -4082,7 +4105,7 @@ function handleMatteToleranceInput() {
   syncChromaToleranceLabel();
   const matteMode = currentMatteMode();
   rememberMatteThreshold(matteMode);
-  if (matteMode === "corridorkey") {
+  if (matteModeUsesCorridorKey(matteMode)) {
     markCorridorPreviewStale();
     scheduleCorridorLivePreview(220);
     return;
@@ -4230,6 +4253,13 @@ function renderInstantChromaPreview() {
   const sourceDataUrl = shouldPopulateSource ? chromaPreviewCanvas.toDataURL("image/png") : "";
   const imageData = context.getImageData(0, 0, width, height);
   const pixels = imageData.data;
+  let sourceHasTransparency = false;
+  for (let index = 3; index < pixels.length; index += 4) {
+    if (pixels[index] < 255) {
+      sourceHasTransparency = true;
+      break;
+    }
+  }
   const keyColors = instantChromaKeyColors(pixels, width, height);
   if (keyColors.length === 0) {
     return;
@@ -4243,17 +4273,21 @@ function renderInstantChromaPreview() {
     const red = pixels[index];
     const green = pixels[index + 1];
     const blue = pixels[index + 2];
+    const sourceAlpha = pixels[index + 3];
     let nearestSquared = Number.POSITIVE_INFINITY;
     for (const [keyRed, keyGreen, keyBlue] of keyColors) {
       const distanceSquared = ((red - keyRed) ** 2) + ((green - keyGreen) ** 2) + ((blue - keyBlue) ** 2);
       if (distanceSquared < nearestSquared) nearestSquared = distanceSquared;
     }
     const distance = Math.sqrt(nearestSquared);
-    const alpha = distance <= threshold
+    const chromaAlpha = distance <= threshold
       ? 0
       : softness <= 0 || distance >= maxDistance
         ? 255
         : Math.floor(((distance - threshold) / softness) * 255);
+    const alpha = sourceHasTransparency
+      ? Math.round((sourceAlpha * chromaAlpha) / 255)
+      : chromaAlpha;
     const spill = Math.max(0, green - Math.max(red, blue));
     const closeness = Math.max(0, 1 - Math.min(distance / maxDistance, 1));
     const reduction = Math.floor(spill * despillStrength * Math.max(closeness, 1 - (alpha / 255)));

@@ -72,6 +72,10 @@ APP_VERSION_POLL_MS = 1200
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".gif"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 ANIMATION_FRAME_EXTENSIONS = IMAGE_EXTENSIONS
+WATERMARK_CORNER_BOXES = {
+    "top_left": (0.04, 0.02, 0.20, 0.13),
+    "bottom_right": (0.84, 0.88, 1.0, 1.0),
+}
 CONTENT_TYPE_EXTENSIONS = {
     "video/mp4": ".mp4",
     "video/quicktime": ".mov",
@@ -146,6 +150,7 @@ CORRIDORKEY_IMG_SIZE = 2048
 CORRIDORKEY_GPU_DESPECKLE_PIXEL_LIMIT = 2**24
 CORRIDORKEY_COLOR_SPACES = {"srgb", "linear"}
 CORRIDORKEY_COARSE_MASKS = {"chroma", "birefnet"}
+CORRIDORKEY_SCREEN_COLORS = {"green", "blue"}
 CORRIDORKEY_DEFAULTS = {
     "color_space": "srgb",
     "despill_strength": 0.5,
@@ -160,6 +165,11 @@ CORRIDORKEY_TORCH_CHECKPOINTS = {
         "nikopueringer/CorridorKey_v1.0",
         "CorridorKey_v1.0.pth",
         "f6386ddf042d8e92aeb5fd16cb9b101cff508195",
+    ),
+    "blue": (
+        "nikopueringer/CorridorKeyBlue_1.0",
+        "CorridorKeyBlue_1.0.pth",
+        "51e6ccaa4b703f54be20a72ac2c37784fb9ba1cd",
     ),
 }
 CANVAS_MODES = {"auto", "square_bottom", "square_center"}
@@ -464,7 +474,8 @@ def huggingface_repo_is_cached(
 
 def corridorkey_checkpoint_is_cached(screen_color: str) -> bool:
     checkpoint_dir = default_corridorkey_root() / "CorridorKeyModule" / "checkpoints"
-    filename = CORRIDORKEY_TORCH_CHECKPOINTS["green"][1]
+    color = normalize_corridorkey_screen(screen_color)
+    filename = CORRIDORKEY_TORCH_CHECKPOINTS[color][1]
     path = checkpoint_dir / filename
     return path.is_file() and path.stat().st_size > 0
 
@@ -478,6 +489,7 @@ def ai_model_install_status(
     matte_mode: str,
     model_key: str = DEFAULT_AI_MATTE_MODEL,
     corridorkey_coarse_mask: str = "chroma",
+    corridorkey_screen: str = "green",
 ) -> dict:
     components = ai_components_for_matte_mode(matte_mode, corridorkey_coarse_mask)
     normalized_model_key = normalize_ai_model_key(model_key)
@@ -491,9 +503,10 @@ def ai_model_install_status(
             BIREFNET_HR_MATTING_REVISION,
         )
     if "corridorkey" in components:
+        screen_color = normalize_corridorkey_screen(corridorkey_screen)
         source_ready = (default_corridorkey_root() / "CorridorKeyModule").is_dir()
         models["corridorkey-source"] = source_ready
-        models["corridorkey-green"] = corridorkey_checkpoint_is_cached("green")
+        models[f"corridorkey-{screen_color}"] = corridorkey_checkpoint_is_cached(screen_color)
     return {
         "required": bool(components),
         "installed": bool(components) and not dependencies_missing and all(models.values()),
@@ -521,7 +534,7 @@ def download_birefnet_model(model_key: str) -> str:
 
 
 def download_corridorkey_checkpoint(screen_color: str) -> str:
-    color = "green"
+    color = normalize_corridorkey_screen(screen_color)
     repo_id, filename, revision = CORRIDORKEY_TORCH_CHECKPOINTS[color]
     checkpoint_dir = default_corridorkey_root() / "CorridorKeyModule" / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -551,6 +564,7 @@ def install_ai_models_for_matte_mode(
     matte_mode: str,
     model_key: str = DEFAULT_AI_MATTE_MODEL,
     corridorkey_coarse_mask: str = "chroma",
+    corridorkey_screen: str = "green",
 ) -> dict:
     if confirmed is not True:
         raise ValueError("必须确认后才能安装 AI 模型。")
@@ -566,10 +580,11 @@ def install_ai_models_for_matte_mode(
             download_birefnet_model(normalized_model_key)
             installed.append(normalized_model_key)
         if "corridorkey" in components:
-            download_corridorkey_checkpoint("green")
-            installed.append("corridorkey-green")
+            screen_color = normalize_corridorkey_screen(corridorkey_screen)
+            download_corridorkey_checkpoint(screen_color)
+            installed.append(f"corridorkey-{screen_color}")
 
-        status = ai_model_install_status(matte_mode, model_key, corridorkey_coarse_mask)
+        status = ai_model_install_status(matte_mode, model_key, corridorkey_coarse_mask, corridorkey_screen)
         if not status["installed"]:
             raise RuntimeError("AI 模型安装未完成，请检查网络和磁盘空间后重试。")
         return {"installed_models": installed, "status": status}
@@ -752,6 +767,8 @@ def normalize_matte_mode(raw: str, chroma_enabled: bool) -> str:
         "corridor": "corridorkey",
         "corridor_key": "corridorkey",
         "corridorkey": "corridorkey",
+        "corridorkey_green": "corridorkey",
+        "corridorkey_blue": "corridorkey",
         "luma": "luma",
         "luma_key": "luma",
         "luminance": "luma",
@@ -812,7 +829,8 @@ def normalize_ai_device(raw: str) -> str:
 
 
 def normalize_corridorkey_screen(raw: str) -> str:
-    return "green"
+    value = str(raw or "green").strip().lower()
+    return value if value in CORRIDORKEY_SCREEN_COLORS else "green"
 
 
 def normalize_corridorkey_coarse_mask(raw: str) -> str:
@@ -885,7 +903,7 @@ def normalize_canvas_mode(raw: str) -> str:
 
 
 def resolve_corridorkey_screen(raw: str, key_rgb: tuple[int, int, int]) -> str:
-    return "green"
+    return normalize_corridorkey_screen(raw)
 
 
 def resolve_ffmpeg_binary(name: str) -> str:
@@ -1049,6 +1067,77 @@ def is_within_root(path: Path, root: Path) -> bool:
 def open_rgba_image(path: Path) -> Image.Image:
     with Image.open(path) as image:
         return image.convert("RGBA")
+
+
+def scaled_fraction_box(size: tuple[int, int], fractions: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
+    width, height = size
+    left, top, right, bottom = fractions
+    return (
+        max(0, min(width, round(width * left))),
+        max(0, min(height, round(height * top))),
+        max(0, min(width, round(width * right))),
+        max(0, min(height, round(height * bottom))),
+    )
+
+
+def watermark_corner_contrast_score(image: Image.Image, box: tuple[int, int, int, int]) -> int:
+    data = image.convert("RGB").crop(box).tobytes()
+    pixels = list(zip(data[0::3], data[1::3], data[2::3]))
+    if not pixels:
+        return 0
+
+    bins: dict[tuple[int, int, int], list[int]] = {}
+    for red, green, blue in pixels:
+        key = (red // 16, green // 16, blue // 16)
+        bucket = bins.setdefault(key, [0, 0, 0, 0])
+        bucket[0] += 1
+        bucket[1] += red
+        bucket[2] += green
+        bucket[3] += blue
+    dominant = max(bins.values(), key=lambda bucket: bucket[0])
+    background = tuple(round(dominant[index] / dominant[0]) for index in range(1, 4))
+    return sum(
+        1
+        for pixel in pixels
+        if sum(abs(pixel[index] - background[index]) for index in range(3)) >= 72
+    )
+
+
+def detect_watermark_corner(image: Image.Image) -> tuple[str | None, dict[str, int]]:
+    scores = {
+        name: watermark_corner_contrast_score(image, scaled_fraction_box(image.size, fractions))
+        for name, fractions in WATERMARK_CORNER_BOXES.items()
+    }
+    location = max(scores, key=scores.get)
+    box = scaled_fraction_box(image.size, WATERMARK_CORNER_BOXES[location])
+    box_area = max(1, (box[2] - box[0]) * (box[3] - box[1]))
+    if scores[location] < max(16, round(box_area * 0.01)):
+        return None, scores
+    return location, scores
+
+
+def remove_detected_watermarks(
+    source_frames: list[Image.Image],
+    processed_frames: list[Image.Image],
+) -> tuple[list[Image.Image], dict]:
+    cleaned_frames: list[Image.Image] = []
+    locations: list[str | None] = []
+    scores: list[dict[str, int]] = []
+    for source, processed in zip(source_frames, processed_frames):
+        location, frame_scores = detect_watermark_corner(source)
+        cleaned = processed.copy()
+        if location:
+            cleaned.paste((0, 0, 0, 0), scaled_fraction_box(cleaned.size, WATERMARK_CORNER_BOXES[location]))
+        cleaned_frames.append(cleaned)
+        locations.append(location)
+        scores.append(frame_scores)
+    return cleaned_frames, {
+        "enabled": True,
+        "mode": "per_frame_corner_box",
+        "removed_frames": sum(location is not None for location in locations),
+        "locations": locations,
+        "scores": scores,
+    }
 
 
 def watch_targets() -> list[Path]:
@@ -1727,6 +1816,7 @@ def chroma_key_frame(
     key_rgbs: list[tuple[int, int, int]] | None = None,
 ) -> Image.Image:
     rgba = image.convert("RGBA")
+    source_has_transparency = rgba.getchannel("A").getextrema()[0] < 255
     output_pixels: list[tuple[int, int, int, int]] = []
     active_key_rgbs = key_rgbs or [key_rgb]
     if softness <= 0:
@@ -1734,7 +1824,7 @@ def chroma_key_frame(
     else:
         max_distance = threshold + softness
 
-    for r_value, g_value, b_value, _ in rgba.getdata():
+    for r_value, g_value, b_value, source_alpha in rgba.getdata():
         dist = min(
             math.sqrt(
                 (r_value - key_r) ** 2
@@ -1749,6 +1839,9 @@ def chroma_key_frame(
             alpha = 255
         else:
             alpha = int(((dist - threshold) / softness) * 255)
+
+        if source_has_transparency:
+            alpha = int(round((source_alpha * alpha) / 255))
 
         max_rb = max(r_value, b_value)
         spill = max(0, g_value - max_rb)
@@ -2901,6 +2994,7 @@ def process_video_to_job(
     corridorkey_enabled: bool,
     corridorkey_screen: str,
     preprocess_esr_smoothing: bool = False,
+    watermark_removal: bool = False,
     batch_background_to_black: bool = False,
     batch_background_desaturate: bool = False,
     batch_semitransparent_to_black: bool = False,
@@ -3008,6 +3102,9 @@ def process_video_to_job(
         corridorkey_options=corridorkey_options,
         corridorkey_coarse_mask=corridorkey_coarse_mask,
     )
+    watermark_info = {"enabled": False, "removed_frames": 0, "locations": []}
+    if watermark_removal:
+        keyed_frames, watermark_info = remove_detected_watermarks(raw_images, keyed_frames)
     key_rgbs = [
         parse_hex_color(color)
         for color in (matte_info.get("key_colors") or [rgb_to_hex(key_rgb)])
@@ -3111,6 +3208,8 @@ def process_video_to_job(
             "corridorkey_options": normalize_corridorkey_options(corridorkey_options),
             "preprocess_esr_smoothing": bool(preprocess_esr_smoothing),
             "preprocess_esr": preprocess_esr_info,
+            "watermark_removal": bool(watermark_removal),
+            "watermark": watermark_info,
             "batch_background_to_black": bool(batch_background_to_black),
             "batch_background_desaturate": bool(batch_background_desaturate),
             "batch_semitransparent_to_black": bool(batch_semitransparent_to_black),
@@ -3545,6 +3644,7 @@ def preview_frame(
     corridorkey_enabled: bool,
     corridorkey_screen: str,
     preprocess_esr_smoothing: bool = False,
+    watermark_removal: bool = False,
     batch_background_to_black: bool = False,
     batch_background_desaturate: bool = False,
     batch_semitransparent_to_black: bool = False,
@@ -3630,6 +3730,9 @@ def preview_frame(
         corridorkey_options=corridorkey_options,
         corridorkey_coarse_mask=corridorkey_coarse_mask,
     )
+    watermark_info = {"enabled": False, "removed_frames": 0, "locations": []}
+    if watermark_removal:
+        keyed_frames, watermark_info = remove_detected_watermarks([raw_image], keyed_frames)
     key_rgbs = [
         parse_hex_color(color)
         for color in (matte_info.get("key_colors") or [rgb_to_hex(key_rgb)])
@@ -3713,6 +3816,8 @@ def preview_frame(
             "corridorkey_options": normalize_corridorkey_options(corridorkey_options),
             "preprocess_esr_smoothing": bool(preprocess_esr_smoothing),
             "preprocess_esr": preprocess_esr_info,
+            "watermark_removal": bool(watermark_removal),
+            "watermark": watermark_info,
             "batch_background_to_black": bool(batch_background_to_black),
             "batch_background_desaturate": bool(batch_background_desaturate),
             "batch_semitransparent_to_black": bool(batch_semitransparent_to_black),
@@ -5363,6 +5468,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     str(payload.get("matte_mode") or ""),
                     str(payload.get("ai_model") or DEFAULT_AI_MATTE_MODEL),
                     str(payload.get("corridorkey_coarse_mask") or "chroma"),
+                    str(payload.get("corridorkey_screen") or "green"),
                 )
                 self.send_json({"ok": True, "status": status})
                 return
@@ -5373,6 +5479,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     matte_mode=str(payload.get("matte_mode") or ""),
                     model_key=str(payload.get("ai_model") or DEFAULT_AI_MATTE_MODEL),
                     corridorkey_coarse_mask=str(payload.get("corridorkey_coarse_mask") or "chroma"),
+                    corridorkey_screen=str(payload.get("corridorkey_screen") or "green"),
                 )
                 self.send_json({"ok": True, "result": result})
                 return
@@ -5480,6 +5587,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         str(payload.get("corridorkey_coarse_mask") or "chroma")
                     ),
                     preprocess_esr_smoothing=bool(payload.get("preprocess_esr_smoothing", False)),
+                    watermark_removal=bool(payload.get("watermark_removal", False)),
                     batch_background_to_black=bool(
                         payload.get("batch_background_to_black", payload.get("batch_green_to_black", False))
                     ),
@@ -5525,6 +5633,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         str(payload.get("corridorkey_coarse_mask") or "chroma")
                     ),
                     preprocess_esr_smoothing=bool(payload.get("preprocess_esr_smoothing", False)),
+                    watermark_removal=bool(payload.get("watermark_removal", False)),
                     batch_background_to_black=bool(
                         payload.get("batch_background_to_black", payload.get("batch_green_to_black", False))
                     ),

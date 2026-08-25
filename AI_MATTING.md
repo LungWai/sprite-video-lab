@@ -27,7 +27,7 @@ CorridorKey is kept separately from the app checkout. Its location is controlled
 set SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT=<corridorkey-dir>
 ```
 
-The Windows helper uses the same optional AI root as the BiRefNet runtime, clones `edenaion/EZ-CorridorKey`, and stores the green-screen checkpoint under `CorridorKeyModule\checkpoints`.
+The Windows helper uses the same optional AI root as the BiRefNet runtime, clones `edenaion/EZ-CorridorKey`, and stores the green-screen and blue-screen checkpoints under `CorridorKeyModule\checkpoints`.
 
 You can also override the Python runtime used by the launcher:
 
@@ -54,14 +54,13 @@ start_sprite_video_lab.bat
 ## Tuning
 
 - `BiRefNet HR-matting` is the only downloaded BiRefNet model.
-- CorridorKey downloads only the green-screen checkpoint. Use Chroma for blue-screen footage.
+- CorridorKey downloads the checkpoint for the selected screen color. Green and blue are separate models.
 - CorridorKey defaults to a Chroma coarse mask. Selecting BiRefNet as the coarse mask also requires the pinned HR-matting model.
 - Alpha-aware despill is automatic for Chroma, Luma, and BiRefNet. CorridorKey exposes EZ-CorridorKey's despill strength directly.
 - If the edge is still dirty, set `halo shrink` to `1` or `2`.
 - For green-screen sources, use manual background color and pick the actual background green when auto corner sampling misses the key color.
 - Use `Luma` for glow, fire, lightning, particles, and other bright-on-dark VFX material.
-- Use `CorridorKey` for true green-screen footage when the edge or foreground still contains screen contamination.
-- CorridorKey is fixed to the green-screen model; use Chroma for blue-screen material.
+- Use `CorridorKey` for true green-screen or blue-screen footage when the edge or foreground still contains screen contamination.
 
 ## Security Note
 
