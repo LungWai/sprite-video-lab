@@ -279,14 +279,34 @@ class FileResponseFailureHttpTests(LiveServerTestCase):
 
 
 class IPv6ServerFactoryHttpTests(unittest.TestCase):
-    def test_factory_serves_ipv6_wildcard_bind_over_loopback(self):
-        probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    def _require_ipv6_loopback(self):
+        probe = None
         try:
+            probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
             probe.bind(("::1", 0))
         except OSError as exc:
             self.skipTest(f"IPv6 loopback unavailable: {exc}")
         finally:
-            probe.close()
+            if probe is not None:
+                probe.close()
+
+    def test_ipv6_probe_skips_when_socket_cannot_be_created(self):
+        with mock.patch.object(socket, "socket", side_effect=OSError("IPv6 unsupported")):
+            with self.assertRaisesRegex(unittest.SkipTest, "IPv6 loopback unavailable"):
+                self._require_ipv6_loopback()
+
+    def test_ipv6_probe_closes_socket_after_loopback_bind_failure(self):
+        probe = mock.Mock()
+        probe.bind.side_effect = OSError("IPv6 loopback unavailable")
+
+        with mock.patch.object(socket, "socket", return_value=probe):
+            with self.assertRaisesRegex(unittest.SkipTest, "IPv6 loopback unavailable"):
+                self._require_ipv6_loopback()
+
+        probe.close.assert_called_once_with()
+
+    def test_factory_serves_ipv6_wildcard_bind_over_loopback(self):
+        self._require_ipv6_loopback()
 
         try:
             httpd = server.create_http_server("::", 0)
