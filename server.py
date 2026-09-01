@@ -11,6 +11,8 @@ import mimetypes
 import os
 import re
 import shutil
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -5618,6 +5620,10 @@ class SpriteVideoLabHTTPServer(ThreadingHTTPServer):
         super().__init__(server_address, handler_class)
 
 
+class SpriteVideoLabIPv6HTTPServer(SpriteVideoLabHTTPServer):
+    address_family = socket.AF_INET6
+
+
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "SpriteVideoLab/0.1"
 
@@ -5668,7 +5674,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_error_json(str(exc), status=exc.status)
         except FileNotFoundError as exc:
             self.send_error_json(str(exc), status=HTTPStatus.NOT_FOUND)
-        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+        except (ValueError, KeyError, RuntimeError, json.JSONDecodeError) as exc:
             self.send_error_json(str(exc), status=HTTPStatus.BAD_REQUEST)
 
     def _do_GET(self) -> None:
@@ -6064,53 +6070,83 @@ class AppHandler(BaseHTTPRequestHandler):
         allow_range: bool = False,
         cache_control: str | None = None,
     ) -> None:
-        path = path.resolve()
-        if not path.exists() or not path.is_file():
+        handle = None
+        try:
+            path = path.resolve(strict=True)
+            handle = path.open("rb")
+            try:
+                file_stat = os.fstat(handle.fileno())
+            except Exception:
+                handle.close()
+                raise
+        except (FileNotFoundError, IsADirectoryError) as exc:
+            raise RequestError(HTTPStatus.NOT_FOUND, "file not found") from exc
+        except PermissionError as exc:
+            raise RequestError(HTTPStatus.FORBIDDEN, "file is not readable") from exc
+        except RuntimeError as exc:
+            raise RequestError(HTTPStatus.BAD_REQUEST, "invalid file path") from exc
+        except OSError as exc:
+            raise RequestError(HTTPStatus.INTERNAL_SERVER_ERROR, "unable to read file") from exc
+
+        if not stat.S_ISREG(file_stat.st_mode):
+            handle.close()
             self.send_error(HTTPStatus.NOT_FOUND)
             return
 
         guessed_type = content_type or mimetypes.guess_type(str(path))[0] or "application/octet-stream"
-        file_size = path.stat().st_size
+        file_size = file_stat.st_size
         range_headers = self.headers.get_all("Range") if allow_range else []
         range_header = range_headers[0] if range_headers and len(range_headers) == 1 else None
 
-        try:
-            byte_range = parse_single_byte_range(range_header, file_size)
-        except UnsatisfiableRange:
-            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-            self.send_header("Content-Range", f"bytes */{file_size}")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
+        with handle:
+            try:
+                byte_range = parse_single_byte_range(range_header, file_size)
+            except UnsatisfiableRange:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{file_size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
 
-        if byte_range is not None:
-            length = (byte_range.end - byte_range.start) + 1
-            self.send_response(HTTPStatus.PARTIAL_CONTENT)
+            if byte_range is not None:
+                length = (byte_range.end - byte_range.start) + 1
+                self.send_response(HTTPStatus.PARTIAL_CONTENT)
+                self.send_header("Content-Type", guessed_type)
+                if cache_control:
+                    self.send_header("Cache-Control", cache_control)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes {byte_range.start}-{byte_range.end}/{file_size}")
+                self.send_header("Content-Length", str(length))
+                self.end_headers()
+                handle.seek(byte_range.start)
+                self.wfile.write(handle.read(length))
+                return
+
+            self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", guessed_type)
             if cache_control:
                 self.send_header("Cache-Control", cache_control)
-            self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Content-Range", f"bytes {byte_range.start}-{byte_range.end}/{file_size}")
-            self.send_header("Content-Length", str(length))
+            self.send_header("Content-Length", str(file_size))
+            if allow_range:
+                self.send_header("Accept-Ranges", "bytes")
             self.end_headers()
-            with path.open("rb") as handle:
-                handle.seek(byte_range.start)
-                self.wfile.write(handle.read(length))
-            return
-
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", guessed_type)
-        if cache_control:
-            self.send_header("Cache-Control", cache_control)
-        self.send_header("Content-Length", str(file_size))
-        if allow_range:
-            self.send_header("Accept-Ranges", "bytes")
-        self.end_headers()
-        with path.open("rb") as handle:
             shutil.copyfileobj(handle, self.wfile)
 
 
 def create_http_server(host: str, port: int) -> SpriteVideoLabHTTPServer:
+    raw_host = host.strip()
+    if raw_host.startswith("[") and raw_host.endswith("]"):
+        raw_host = raw_host[1:-1]
+    try:
+        bind_ip = ipaddress.ip_address(raw_host)
+    except ValueError:
+        bind_ip = None
+    if bind_ip is not None and bind_ip.version == 6:
+        return SpriteVideoLabIPv6HTTPServer(
+            (bind_ip.compressed, port),
+            AppHandler,
+            bind_host=host,
+        )
     return SpriteVideoLabHTTPServer((host, port), AppHandler, bind_host=host)
 
 

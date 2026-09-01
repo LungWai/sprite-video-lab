@@ -1,7 +1,11 @@
+import http.client
 import json
 import os
+import socket
+import threading
 import unittest
 from http import HTTPStatus
+from pathlib import Path
 from unittest import mock
 
 import server
@@ -195,6 +199,117 @@ class MediaRangeHttpTests(LiveServerTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Length"], "100")
         self.assertEqual(body, self.media_bytes)
+
+
+class FileResponseFailureHttpTests(LiveServerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.file_path = self.work_root / "unstable.bin"
+        self.file_path.write_bytes(b"unstable-content")
+
+    def request_file(self):
+        try:
+            return self.request("GET", "/work/unstable.bin")
+        except (http.client.HTTPException, OSError) as exc:
+            self.fail(f"GET closed without a controlled response: {exc}")
+
+    def test_file_disappearing_during_open_returns_404_before_success_headers(self):
+        original_open = Path.open
+        target = self.file_path.resolve()
+
+        def disappearing_open(path, *args, **kwargs):
+            if path == target:
+                raise FileNotFoundError("file disappeared")
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", new=disappearing_open):
+            status, headers, payload = self.request_file()
+
+        self.assertEqual(status, 404)
+        self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
+        self.assertFalse(json.loads(payload)["ok"])
+
+    def test_file_permission_failure_returns_403_before_success_headers(self):
+        original_open = Path.open
+        target = self.file_path.resolve()
+
+        def unreadable_open(path, *args, **kwargs):
+            if path == target:
+                raise PermissionError("file is unreadable")
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", new=unreadable_open):
+            status, headers, payload = self.request_file()
+
+        self.assertEqual(status, 403)
+        self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
+        self.assertFalse(json.loads(payload)["ok"])
+
+    def test_file_descriptor_metadata_failure_returns_error_before_success_headers(self):
+        with mock.patch.object(server.os, "fstat", side_effect=OSError("metadata unavailable")):
+            status, headers, payload = self.request_file()
+
+        self.assertEqual(status, 500)
+        self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
+        self.assertFalse(json.loads(payload)["ok"])
+
+    def test_directory_path_remains_a_controlled_404(self):
+        directory = self.work_root / "not-a-file"
+        directory.mkdir()
+
+        status, _, _ = self.request("GET", "/work/not-a-file")
+
+        self.assertEqual(status, 404)
+
+    def test_symlink_loop_returns_controlled_400(self):
+        loop = self.work_root / "loop"
+        try:
+            loop.symlink_to(loop.name)
+        except OSError as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+
+        try:
+            status, headers, payload = self.request("GET", "/work/loop")
+        except (http.client.HTTPException, OSError) as exc:
+            self.fail(f"GET closed without a controlled response: {exc}")
+
+        self.assertEqual(status, 400)
+        self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
+        self.assertFalse(json.loads(payload)["ok"])
+
+
+class IPv6ServerFactoryHttpTests(unittest.TestCase):
+    def test_factory_serves_ipv6_wildcard_bind_over_loopback(self):
+        probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            probe.bind(("::1", 0))
+        except OSError as exc:
+            self.skipTest(f"IPv6 loopback unavailable: {exc}")
+        finally:
+            probe.close()
+
+        try:
+            httpd = server.create_http_server("::", 0)
+        except OSError as exc:
+            self.fail(f"IPv6 server factory failed: {exc}")
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("::1", httpd.server_address[1], timeout=5)
+        try:
+            connection.putrequest("GET", "/api/runtime-info", skip_host=True)
+            connection.putheader("Host", f"[::1]:{httpd.server_address[1]}")
+            connection.endheaders()
+            response = connection.getresponse()
+            payload = response.read()
+
+            self.assertEqual(httpd.address_family, socket.AF_INET6)
+            self.assertEqual(response.status, 200)
+            self.assertTrue(json.loads(payload)["ok"])
+        finally:
+            connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=5)
 
 
 class RequestBoundaryHttpTests(LiveServerTestCase):
