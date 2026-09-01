@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import colorsys
 import errno
+import hashlib
+import hmac
 import importlib.util
 import ipaddress
 import json
@@ -413,6 +415,8 @@ REAL_ESRGAN_WINDOWS_PACKAGE_URL = (
     "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/"
     "realesrgan-ncnn-vulkan-20220424-windows.zip"
 )
+REAL_ESRGAN_WINDOWS_PACKAGE_SHA256 = "abc02804e17982a3be33675e4d471e91ea374e65b70167abc09e31acb412802d"
+REAL_ESRGAN_WINDOWS_PACKAGE_MAX_BYTES = 64 * 1024 * 1024
 MAGIC_CROP_PADDING = 24
 MAGIC_UPSCALE = 4
 MAGIC_ALPHA_LOSS_FALLBACK_RATIO = 0.05
@@ -4356,14 +4360,48 @@ def realesrgan_install_status() -> dict:
     }
 
 
+def copy_verified_download(response: BinaryIO, destination: Path, expected_sha256: str, max_bytes: int) -> int:
+    digest = hashlib.sha256()
+    written = 0
+    try:
+        with destination.open("wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise RuntimeError("download exceeds the allowed size")
+                digest.update(chunk)
+                output.write(chunk)
+        if not hmac.compare_digest(digest.hexdigest(), expected_sha256):
+            raise RuntimeError("download checksum mismatch")
+        return written
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+
+
 def download_realesrgan_windows_package(destination: Path) -> None:
     request = Request(
         REAL_ESRGAN_WINDOWS_PACKAGE_URL,
         headers={"User-Agent": "Sprite-Video-Lab/Real-ESRGAN-Installer"},
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with urlopen(request, timeout=120) as response, destination.open("wb") as output:
-        shutil.copyfileobj(response, output)
+    with urlopen(request, timeout=120) as response:
+        advertised_length = response.headers.get("Content-Length")
+        try:
+            advertised_bytes = int(advertised_length) if advertised_length is not None else None
+        except (TypeError, ValueError):
+            advertised_bytes = None
+        if advertised_bytes is not None and advertised_bytes > REAL_ESRGAN_WINDOWS_PACKAGE_MAX_BYTES:
+            raise RuntimeError("download exceeds the allowed size")
+        copy_verified_download(
+            response,
+            destination,
+            REAL_ESRGAN_WINDOWS_PACKAGE_SHA256,
+            REAL_ESRGAN_WINDOWS_PACKAGE_MAX_BYTES,
+        )
 
 
 def extract_realesrgan_package(package_path: Path, extract_dir: Path) -> Path:

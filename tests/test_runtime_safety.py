@@ -1,9 +1,26 @@
+import hashlib
+import io
 import tempfile
 import unittest
+import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
 import server
+
+
+class InMemoryDownloadResponse(io.BytesIO):
+    def __init__(self, payload: bytes, *, advertised_length: int | None = None):
+        super().__init__(payload)
+        self.headers = {}
+        if advertised_length is not None:
+            self.headers["Content-Length"] = str(advertised_length)
+        self.read_sizes = []
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        return super().read(size)
 
 
 class RuntimeSafetyTests(unittest.TestCase):
@@ -133,3 +150,173 @@ class RuntimeSafetyTests(unittest.TestCase):
             if alias.exists() and alias.resolve() == resolved:
                 return alias
         return resolved
+
+
+class RealEsrganIntegrityTests(unittest.TestCase):
+    def test_verified_download_writes_matching_bytes_in_one_mib_chunks(self):
+        payload = (b"v" * (1024 * 1024)) + b"erified"
+        expected_sha256 = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "package.zip"
+            with InMemoryDownloadResponse(payload) as response:
+                written = self.copy_verified_download(
+                    response,
+                    destination,
+                    expected_sha256,
+                    len(payload),
+                )
+
+            self.assertEqual(written, len(payload))
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(response.read_sizes, [1024 * 1024] * 3)
+
+    def test_verified_download_rejects_altered_bytes_without_partial_artifact(self):
+        expected_sha256 = hashlib.sha256(b"expected archive").hexdigest()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "package.zip"
+            with InMemoryDownloadResponse(b"altered archive") as response:
+                with self.assertRaisesRegex(RuntimeError, "checksum"):
+                    self.copy_verified_download(
+                        response,
+                        destination,
+                        expected_sha256,
+                        1024,
+                    )
+
+            self.assertFalse(destination.exists())
+
+    def test_verified_download_rejects_oversized_stream_without_partial_artifact(self):
+        payload = b"oversized"
+        expected_sha256 = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "package.zip"
+            with InMemoryDownloadResponse(payload) as response:
+                with self.assertRaisesRegex(RuntimeError, "allowed size"):
+                    self.copy_verified_download(
+                        response,
+                        destination,
+                        expected_sha256,
+                        len(payload) - 1,
+                    )
+
+            self.assertFalse(destination.exists())
+
+    def test_download_rejects_checksum_mismatch_without_partial_artifact(self):
+        payload = b"altered archive"
+        expected_sha256 = hashlib.sha256(b"expected archive").hexdigest()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "package.zip"
+            response = InMemoryDownloadResponse(payload, advertised_length=len(payload))
+            with (
+                mock.patch.object(server, "urlopen", return_value=response),
+                mock.patch.object(server, "REAL_ESRGAN_WINDOWS_PACKAGE_SHA256", expected_sha256),
+                self.assertRaisesRegex(RuntimeError, "checksum"),
+            ):
+                server.download_realesrgan_windows_package(destination)
+
+            self.assertFalse(destination.exists())
+
+    def test_download_rejects_advertised_oversize_before_streaming(self):
+        payload = b"must not be read"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "package.zip"
+            response = InMemoryDownloadResponse(payload, advertised_length=(64 * 1024 * 1024) + 1)
+            with (
+                mock.patch.object(server, "urlopen", return_value=response),
+                self.assertRaisesRegex(RuntimeError, "allowed size"),
+            ):
+                server.download_realesrgan_windows_package(destination)
+
+            self.assertEqual(response.read_sizes, [])
+            self.assertFalse(destination.exists())
+
+    def test_download_enforces_streamed_size_despite_smaller_advertised_length(self):
+        payload = b"12345"
+        expected_sha256 = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "package.zip"
+            response = InMemoryDownloadResponse(payload, advertised_length=4)
+            with (
+                mock.patch.object(server, "urlopen", return_value=response),
+                mock.patch.object(server, "REAL_ESRGAN_WINDOWS_PACKAGE_MAX_BYTES", 4),
+                mock.patch.object(server, "REAL_ESRGAN_WINDOWS_PACKAGE_SHA256", expected_sha256),
+                self.assertRaisesRegex(RuntimeError, "allowed size"),
+            ):
+                server.download_realesrgan_windows_package(destination)
+
+            self.assertFalse(destination.exists())
+
+    def test_invalid_archive_install_leaves_fresh_target_absent(self):
+        payload = b"not a ZIP archive"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir) / "work"
+            target_dir = work_dir / "tools" / "realesrgan-ncnn-vulkan"
+
+            with self.invalid_archive_install_context(work_dir, payload):
+                with self.assertRaises(zipfile.BadZipFile):
+                    server.install_realesrgan_runtime(True)
+
+            self.assertFalse(target_dir.exists())
+
+    def test_invalid_archive_install_preserves_preexisting_partial_target(self):
+        payload = b"not a ZIP archive"
+        sentinel_bytes = b"pre-existing partial installation\x00\xff"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir) / "work"
+            target_dir = work_dir / "tools" / "realesrgan-ncnn-vulkan"
+            nested_dir = target_dir / "models"
+            nested_dir.mkdir(parents=True)
+            sentinel = nested_dir / "sentinel.bin"
+            sentinel.write_bytes(sentinel_bytes)
+            before = self.snapshot_tree(target_dir)
+
+            with self.invalid_archive_install_context(work_dir, payload):
+                with self.assertRaises(zipfile.BadZipFile):
+                    server.install_realesrgan_runtime(True)
+
+            self.assertEqual(self.snapshot_tree(target_dir), before)
+            self.assertEqual(sentinel.read_bytes(), sentinel_bytes)
+
+    def copy_verified_download(self, response, destination, expected_sha256, max_bytes):
+        copy_download = getattr(server, "copy_verified_download", None)
+        self.assertIsNotNone(copy_download, "copy_verified_download is missing")
+        return copy_download(response, destination, expected_sha256, max_bytes)
+
+    @staticmethod
+    @contextmanager
+    def invalid_archive_install_context(work_dir: Path, payload: bytes):
+        response = InMemoryDownloadResponse(payload, advertised_length=len(payload))
+        expected_sha256 = hashlib.sha256(payload).hexdigest()
+        with (
+            mock.patch.object(server, "WORK_DIR", work_dir),
+            mock.patch.object(server, "resolve_realesrgan_binary", return_value=None),
+            mock.patch.object(server, "resolve_realesrgan_model_dir", return_value=None),
+            mock.patch.object(server, "urlopen", return_value=response),
+            mock.patch.object(server, "REAL_ESRGAN_WINDOWS_PACKAGE_SHA256", expected_sha256),
+        ):
+            yield
+
+    @staticmethod
+    def snapshot_tree(root: Path) -> dict[str, tuple[str, bytes]]:
+        snapshot = {}
+        for path in sorted(root.rglob("*")):
+            relative_path = path.relative_to(root).as_posix()
+            snapshot[relative_path] = ("directory", b"") if path.is_dir() else ("file", path.read_bytes())
+        return snapshot
+
+
+class RealEsrganArchiveSafetyTests(unittest.TestCase):
+    def test_realesrgan_archive_rejects_unsafe_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package_path = root / "package.zip"
+            extract_dir = root / "extracted"
+            extract_dir.mkdir()
+            outside_path = root / "outside.txt"
+            with zipfile.ZipFile(package_path, "w") as archive:
+                archive.writestr("../outside.txt", b"must stay contained")
+
+            with self.assertRaises(RuntimeError):
+                server.extract_realesrgan_package(package_path, extract_dir)
+
+            self.assertFalse(outside_path.exists())
