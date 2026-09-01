@@ -6,8 +6,6 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
-from http.server import ThreadingHTTPServer
-
 import server
 
 
@@ -45,7 +43,7 @@ class LiveServerTestCase(unittest.TestCase):
             ),
         ))
         server.ensure_runtime_dirs()
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.AppHandler)
+        self.httpd = server.create_http_server("127.0.0.1", 0)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
         self.is_serving = True
@@ -70,9 +68,15 @@ class LiveServerTestCase(unittest.TestCase):
             self.thread = None
         self.is_serving = False
 
-    def request(self, method, path, body=b"", headers=None):
-        request_headers = [("Host", f"127.0.0.1:{self.port}")]
-        request_headers.extend((headers or {}).items() if hasattr(headers, "items") else headers or ())
+    def request(self, method, path, body=b"", headers=None, *, skip_host=False):
+        supplied_headers = list((headers or {}).items() if hasattr(headers, "items") else headers or ())
+        framing_names = {name.lower() for name, _ in supplied_headers}
+        if body and not framing_names.intersection({"content-length", "transfer-encoding"}):
+            supplied_headers.append(("Content-Length", str(len(body))))
+        request_headers = []
+        if not skip_host and not any(name.lower() == "host" for name, _ in supplied_headers):
+            request_headers.append(("Host", f"127.0.0.1:{self.port}"))
+        request_headers.extend(supplied_headers)
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         try:
             connection.putrequest(method, path, skip_host=True)

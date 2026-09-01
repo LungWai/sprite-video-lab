@@ -214,6 +214,8 @@ start_sprite_video_lab_portable.bat
 | --- | --- |
 | `SPRITE_VIDEO_LAB_HOST` | 服务地址，默认 `127.0.0.1` |
 | `SPRITE_VIDEO_LAB_PORT` | 服务端口，默认 `8894` |
+| `SPRITE_VIDEO_LAB_ALLOWED_HOSTS` | 额外允许的请求主机名或 IP，多个值以逗号分隔；默认回环地址无需配置 |
+| `SPRITE_VIDEO_LAB_MAX_UPLOAD_BYTES` | 上传请求体字节上限，必须为正整数，默认 2 GiB |
 | `SPRITE_VIDEO_LAB_WORK_DIR` | 上传、任务、缓存和导出等运行时文件目录 |
 | `SPRITE_VIDEO_LAB_FFMPEG_DIR` | 包含 `ffmpeg.exe` 和 `ffprobe.exe` 的目录 |
 | `SPRITE_VIDEO_LAB_FFMPEG_ACCEL` | ffmpeg 加速方式：`auto`、`cpu`、`cuda`、`qsv`、`d3d11va`、`dxva2` |
@@ -222,6 +224,8 @@ start_sprite_video_lab_portable.bat
 | `SPRITE_VIDEO_LAB_PYTHON` | 启动器使用的 Python 可执行文件 |
 | `SPRITE_VIDEO_LAB_REALESRGAN_BIN` | `realesrgan-ncnn-vulkan.exe` 的路径 |
 | `SPRITE_VIDEO_LAB_REALESRGAN_MODEL_DIR` | Real-ESRGAN `.param` 与 `.bin` 模型目录 |
+
+绑定 `0.0.0.0` 或 `::` 不会自动信任任意请求主机。使用通配地址监听时，需通过 `SPRITE_VIDEO_LAB_ALLOWED_HOSTS` 明确列出浏览器实际访问的主机名或 IP；仅在本机回环地址使用时无需额外配置。
 
 ## 项目结构
 

@@ -4,6 +4,7 @@ import argparse
 import cgi
 import colorsys
 import importlib.util
+import ipaddress
 import json
 import math
 import mimetypes
@@ -23,7 +24,7 @@ from fractions import Fraction
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 from urllib.request import Request, urlopen
 
 from PIL import Image, ImageChops, ImageFilter
@@ -61,6 +62,16 @@ GENERATED_EXPORT_DIR_PATTERN = re.compile(
     r")$"
 )
 MAGIC_PREVIEW_LOCK = threading.Lock()
+MAX_JSON_BODY_BYTES = 1024 * 1024
+DEFAULT_MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+ALLOWED_HOSTS_ENV = "SPRITE_VIDEO_LAB_ALLOWED_HOSTS"
+MAX_UPLOAD_BYTES_ENV = "SPRITE_VIDEO_LAB_MAX_UPLOAD_BYTES"
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; base-uri 'none'; object-src 'none'; "
+    "frame-ancestors 'none'; form-action 'self'; connect-src 'self'; "
+    "img-src 'self' blob: data:; media-src 'self' blob:; "
+    "script-src 'self'; style-src 'self' 'unsafe-inline'"
+)
 
 
 @dataclass(frozen=True)
@@ -71,6 +82,139 @@ class ByteRange:
 
 class UnsatisfiableRange(ValueError):
     pass
+
+
+class RequestError(ValueError):
+    def __init__(self, status: HTTPStatus, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+def parse_content_length(value: str | None, *, required: bool, maximum: int) -> int:
+    normalized = "" if value is None else value.strip()
+    if not normalized:
+        if required:
+            raise RequestError(HTTPStatus.LENGTH_REQUIRED, "Content-Length is required")
+        return 0
+    if not normalized.isascii() or not normalized.isdecimal():
+        raise RequestError(HTTPStatus.BAD_REQUEST, "invalid Content-Length")
+    significant = normalized.lstrip("0") or "0"
+    if len(significant) > len(str(maximum)):
+        raise RequestError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body is too large")
+    length = int(significant)
+    if length > maximum:
+        raise RequestError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body is too large")
+    return length
+
+
+def configured_max_upload_bytes() -> int:
+    raw = str(os.environ.get(MAX_UPLOAD_BYTES_ENV, DEFAULT_MAX_UPLOAD_BYTES)).strip()
+    if not raw.isascii() or not raw.isdecimal():
+        raise ValueError(f"{MAX_UPLOAD_BYTES_ENV} must be a positive decimal byte count")
+    significant = raw.lstrip("0") or "0"
+    if significant == "0" or len(significant) > 20:
+        raise ValueError(f"{MAX_UPLOAD_BYTES_ENV} must be a positive decimal byte count")
+    return int(significant)
+
+
+def _canonical_host(host: str) -> str:
+    normalized = host.rstrip(".").lower()
+    if not normalized or not normalized.isascii():
+        raise ValueError("invalid host")
+    try:
+        return ipaddress.ip_address(normalized).compressed
+    except ValueError:
+        if re.fullmatch(r"[0-9.]+", normalized):
+            raise ValueError("invalid host")
+    if len(normalized) > 253:
+        raise ValueError("invalid host")
+    labels = normalized.split(".")
+    if any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels):
+        raise ValueError("invalid host")
+    return normalized
+
+
+def _parse_authority(value: str | None) -> tuple[str, int | None]:
+    raw = "" if value is None else value.strip()
+    if (
+        not raw
+        or raw.endswith(":")
+        or any(character in raw for character in "/?#@")
+        or any(character.isspace() for character in raw)
+    ):
+        raise ValueError("invalid authority")
+    parsed = urlsplit(f"//{raw}")
+    if parsed.username is not None or parsed.password is not None or not parsed.hostname:
+        raise ValueError("invalid authority")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid authority") from exc
+    return _canonical_host(parsed.hostname), port
+
+
+def _format_authority(host: str, port: int | None) -> str:
+    rendered_host = f"[{host}]" if ":" in host else host
+    return rendered_host if port is None else f"{rendered_host}:{port}"
+
+
+def _canonical_allowlist_entry(value: str) -> str:
+    raw = value.strip()
+    if raw.count(":") > 1 and not raw.startswith("["):
+        raw = f"[{raw}]"
+    host, port = _parse_authority(raw)
+    return _format_authority(host, port)
+
+
+def allowed_request_hosts(bind_host: str) -> frozenset[str]:
+    allowed = {"localhost", "127.0.0.1", "[::1]"}
+    bind_entry = _canonical_allowlist_entry(bind_host)
+    bind_name, _ = _parse_authority(bind_entry)
+    if bind_name not in {"0.0.0.0", "::"}:
+        allowed.add(bind_entry)
+    for value in str(os.environ.get(ALLOWED_HOSTS_ENV, "")).split(","):
+        if not value.strip():
+            continue
+        entry = _canonical_allowlist_entry(value)
+        name, _ = _parse_authority(entry)
+        if name not in {"0.0.0.0", "::"}:
+            allowed.add(entry)
+    return frozenset(allowed)
+
+
+def request_host_allowed(value: str | None, allowed_hosts: frozenset[str]) -> bool:
+    try:
+        host, port = _parse_authority(value)
+    except ValueError:
+        return False
+    for allowed in allowed_hosts:
+        try:
+            allowed_host, allowed_port = _parse_authority(allowed)
+        except ValueError:
+            continue
+        if host == allowed_host and (allowed_port is None or port == allowed_port):
+            return True
+    return False
+
+
+def origin_matches_request(origin: str, request_host: str) -> bool:
+    try:
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme.lower() != "http"
+            or not parsed.netloc
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return False
+        origin_host, origin_port = _parse_authority(parsed.netloc)
+        host, port = _parse_authority(request_host)
+        return (origin_host, origin_port or 80) == (host, port or 80)
+    except (ValueError, TypeError):
+        return False
 
 
 def _decimal_above(value: str, ceiling: int) -> int:
@@ -5464,6 +5608,16 @@ def export_job(job_id: str, selected_indices: list[int], video_duration_ms: int,
     return result
 
 
+class SpriteVideoLabHTTPServer(ThreadingHTTPServer):
+    allowed_hosts: frozenset[str]
+    max_upload_bytes: int
+
+    def __init__(self, server_address: tuple[str, int], handler_class, *, bind_host: str):
+        self.allowed_hosts = allowed_request_hosts(bind_host)
+        self.max_upload_bytes = configured_max_upload_bytes()
+        super().__init__(server_address, handler_class)
+
+
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "SpriteVideoLab/0.1"
 
@@ -5474,6 +5628,7 @@ class AppHandler(BaseHTTPRequestHandler):
         body = json_bytes(payload)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -5481,7 +5636,42 @@ class AppHandler(BaseHTTPRequestHandler):
     def send_error_json(self, message: str, status: int = HTTPStatus.BAD_REQUEST) -> None:
         self.send_json({"ok": False, "error": message}, status=status)
 
+    def end_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+        super().end_headers()
+
+    def request_host(self) -> str:
+        values = self.headers.get_all("Host") or []
+        allowed_hosts = getattr(self.server, "allowed_hosts", frozenset())
+        if len(values) != 1 or not request_host_allowed(values[0], allowed_hosts):
+            raise RequestError(HTTPStatus.MISDIRECTED_REQUEST, "request Host is not allowed")
+        return values[0]
+
+    def validate_post_boundary(self) -> None:
+        request_host = self.request_host()
+        if self.headers.get_all("Transfer-Encoding"):
+            raise RequestError(HTTPStatus.BAD_REQUEST, "Transfer-Encoding is not supported")
+        if len(self.headers.get_all("Content-Length") or []) > 1:
+            raise RequestError(HTTPStatus.BAD_REQUEST, "multiple Content-Length fields are not allowed")
+        origins = self.headers.get_all("Origin") or []
+        if len(origins) > 1 or (origins and not origin_matches_request(origins[0], request_host)):
+            raise RequestError(HTTPStatus.FORBIDDEN, "request Origin does not match Host")
+
     def do_GET(self) -> None:
+        try:
+            self.request_host()
+            self._do_GET()
+        except RequestError as exc:
+            self.send_error_json(str(exc), status=exc.status)
+        except FileNotFoundError as exc:
+            self.send_error_json(str(exc), status=HTTPStatus.NOT_FOUND)
+        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+            self.send_error_json(str(exc), status=HTTPStatus.BAD_REQUEST)
+
+    def _do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/app-version":
             self.send_json(
@@ -5520,8 +5710,9 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        parsed = urlparse(self.path)
         try:
+            self.validate_post_boundary()
+            parsed = urlparse(self.path)
             if parsed.path == "/api/ai-model-status":
                 payload = self.read_json_body()
                 status = ai_model_install_status(
@@ -5813,6 +6004,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 open_path_in_file_browser(target)
                 self.send_json({"ok": True})
                 return
+        except RequestError as exc:
+            self.send_error_json(str(exc), status=exc.status)
+            return
         except FileNotFoundError as exc:
             self.send_error_json(str(exc), status=HTTPStatus.NOT_FOUND)
             return
@@ -5823,9 +6017,23 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def read_json_body(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        raw = self.rfile.read(length) if length > 0 else b"{}"
-        return json.loads(raw.decode("utf-8"))
+        if self.headers.get_content_type() != "application/json":
+            raise RequestError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "application/json is required")
+        length = parse_content_length(
+            self.headers.get("Content-Length"),
+            required=False,
+            maximum=MAX_JSON_BODY_BYTES,
+        )
+        raw = self.rfile.read(length) if length else b"{}"
+        if length and len(raw) != length:
+            raise RequestError(HTTPStatus.BAD_REQUEST, "incomplete request body")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RequestError(HTTPStatus.BAD_REQUEST, "invalid JSON body") from exc
+        if not isinstance(payload, dict):
+            raise RequestError(HTTPStatus.BAD_REQUEST, "JSON body must be an object")
+        return payload
 
     def serve_app_file(self, path: Path, content_type: str | None = None, allow_range: bool = False) -> None:
         if not is_within_root(path, APP_DIR):
@@ -5902,9 +6110,13 @@ class AppHandler(BaseHTTPRequestHandler):
             shutil.copyfileobj(handle, self.wfile)
 
 
+def create_http_server(host: str, port: int) -> SpriteVideoLabHTTPServer:
+    return SpriteVideoLabHTTPServer((host, port), AppHandler, bind_host=host)
+
+
 def serve_once(host: str, port: int) -> None:
     ensure_runtime_dirs()
-    server = ThreadingHTTPServer((host, port), AppHandler)
+    server = create_http_server(host, port)
     print(f"Sprite Video Lab running at http://{host}:{port}")
     try:
         server.serve_forever()
