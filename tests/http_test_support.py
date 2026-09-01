@@ -71,11 +71,14 @@ class LiveServerTestCase(unittest.TestCase):
         self.is_serving = False
 
     def request(self, method, path, body=b"", headers=None):
-        request_headers = {"Host": f"127.0.0.1:{self.port}"}
-        request_headers.update(headers or {})
+        request_headers = [("Host", f"127.0.0.1:{self.port}")]
+        request_headers.extend((headers or {}).items() if hasattr(headers, "items") else headers or ())
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         try:
-            connection.request(method, path, body=body, headers=request_headers)
+            connection.putrequest(method, path, skip_host=True)
+            for name, value in request_headers:
+                connection.putheader(name, value)
+            connection.endheaders(body)
             response = connection.getresponse()
             return response.status, dict(response.getheaders()), response.read()
         finally:

@@ -91,3 +91,14 @@ class MediaRangeHttpTests(LiveServerTestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(headers["Content-Length"], "100")
                 self.assertEqual(body, self.media_bytes)
+
+    def test_duplicate_range_fields_return_full_file(self):
+        status, headers, body = self.request(
+            "GET",
+            "/media/upload/range-fixture",
+            headers=[("Range", "bytes=0-15"), ("Range", "bytes=16-")],
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Length"], "100")
+        self.assertEqual(body, self.media_bytes)

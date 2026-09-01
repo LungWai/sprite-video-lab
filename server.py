@@ -5863,7 +5863,8 @@ class AppHandler(BaseHTTPRequestHandler):
 
         guessed_type = content_type or mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         file_size = path.stat().st_size
-        range_header = self.headers.get("Range") if allow_range else None
+        range_headers = self.headers.get_all("Range") if allow_range else []
+        range_header = range_headers[0] if range_headers and len(range_headers) == 1 else None
 
         try:
             byte_range = parse_single_byte_range(range_header, file_size)
