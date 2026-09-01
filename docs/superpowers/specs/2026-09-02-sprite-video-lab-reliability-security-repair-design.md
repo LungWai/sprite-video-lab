@@ -1,7 +1,7 @@
 # Sprite Video Lab Reliability and Security Repair Design
 
 Date: 2026-09-02
-Status: Approved in chat; pending written-spec review
+Status: Approved
 
 ## Context
 
