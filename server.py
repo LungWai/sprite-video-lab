@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime
 from fractions import Fraction
 from http import HTTPStatus
@@ -51,6 +52,7 @@ SETTINGS_PATH = WORK_DIR / "settings.json"
 LEGACY_SETTINGS_PATH = DEFAULT_WORK_DIR / "settings.json"
 MANAGED_RUNTIME_DIRS = (UPLOADS_DIR, JOBS_DIR, EXPORTS_DIR, PREVIEWS_DIR, LINE_CLEANER_DIR, MAGIC_DIR)
 RUNTIME_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SINGLE_BYTE_RANGE_PATTERN = re.compile(r"^bytes=(\d*)-(\d*)$")
 GENERATED_EXPORT_DIR_PATTERN = re.compile(
     r"^\d{8}-\d{6}-[0-9a-f]{4}-(?:"
     r"export|"
@@ -59,6 +61,47 @@ GENERATED_EXPORT_DIR_PATTERN = re.compile(
     r")$"
 )
 MAGIC_PREVIEW_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class ByteRange:
+    start: int
+    end: int
+
+
+class UnsatisfiableRange(ValueError):
+    pass
+
+
+def _decimal_above(value: str, ceiling: int) -> int:
+    normalized = value.lstrip("0") or "0"
+    ceiling_text = str(ceiling)
+    if len(normalized) > len(ceiling_text):
+        return ceiling + 1
+    return int(normalized)
+
+
+def parse_single_byte_range(header: str | None, file_size: int) -> ByteRange | None:
+    if not header or "," in header:
+        return None
+    match = SINGLE_BYTE_RANGE_PATTERN.fullmatch(header)
+    if not match:
+        return None
+    first, last = match.groups()
+    if not first and not last:
+        return None
+    if file_size <= 0:
+        raise UnsatisfiableRange(header)
+    if not first:
+        suffix = _decimal_above(last, file_size)
+        if suffix == 0:
+            raise UnsatisfiableRange(header)
+        return ByteRange(max(0, file_size - suffix), file_size - 1)
+    start = _decimal_above(first, file_size)
+    end = file_size - 1 if not last else min(_decimal_above(last, file_size), file_size - 1)
+    if start >= file_size or start > end:
+        raise UnsatisfiableRange(header)
+    return ByteRange(start, end)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8894
@@ -5822,25 +5865,27 @@ class AppHandler(BaseHTTPRequestHandler):
         file_size = path.stat().st_size
         range_header = self.headers.get("Range") if allow_range else None
 
-        if range_header and range_header.startswith("bytes="):
-            start_text, _, end_text = range_header.removeprefix("bytes=").partition("-")
-            start = int(start_text or "0")
-            end = int(end_text or file_size - 1)
-            end = min(end, file_size - 1)
-            if start > end:
-                self.send_error(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                return
-            length = (end - start) + 1
+        try:
+            byte_range = parse_single_byte_range(range_header, file_size)
+        except UnsatisfiableRange:
+            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+            self.send_header("Content-Range", f"bytes */{file_size}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        if byte_range is not None:
+            length = (byte_range.end - byte_range.start) + 1
             self.send_response(HTTPStatus.PARTIAL_CONTENT)
             self.send_header("Content-Type", guessed_type)
             if cache_control:
                 self.send_header("Cache-Control", cache_control)
             self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+            self.send_header("Content-Range", f"bytes {byte_range.start}-{byte_range.end}/{file_size}")
             self.send_header("Content-Length", str(length))
             self.end_headers()
             with path.open("rb") as handle:
-                handle.seek(start)
+                handle.seek(byte_range.start)
                 self.wfile.write(handle.read(length))
             return
 
