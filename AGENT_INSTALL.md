@@ -54,7 +54,7 @@ The app also checks its built-in fallback path used by the maintainer machine, b
 
 ## 4. Optional AI Matting Runtime
 
-Install this only when the user needs BiRefNet, Luma combinations, or CorridorKey:
+Install this manually only when the user explicitly asks for AI setup. The WebApp otherwise waits until the user selects BiRefNet or CorridorKey and confirms the in-app installation prompt:
 
 ```powershell
 .\setup_ai_runtime.bat
@@ -64,7 +64,7 @@ Recommended external cache layout:
 
 ```powershell
 $env:SPRITE_VIDEO_LAB_AI_MODEL_CACHE = "E:\sprite-video-lab-models\huggingface"
-$env:SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT = "E:\sprite-video-lab-models\CorridorKey"
+$env:SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT = "E:\sprite-video-lab-models\EZ-CorridorKey"
 ```
 
 If `setup_ai_runtime.bat` creates or expects a separate Python runtime, start the app with that runtime instead of `.venv`:
@@ -77,7 +77,11 @@ BiRefNet downloads model files on first use. Treat the first AI preview as an in
 
 ## 5. Optional Real-ESRGAN Line Cleaner Runtime
 
-The experimental line cleaner can call `realesrgan-ncnn-vulkan` with the `realesrgan-x4plus-anime` model. Put the portable package in one of these locations:
+When the user confirms **先做平滑处理**, the WebApp checks this runtime and automatically downloads the official Windows portable package if it is missing. Preview and batch processing stay disabled until installation succeeds. The automatic target is:
+
+- `<configured work dir>\tools\realesrgan-ncnn-vulkan\realesrgan-ncnn-vulkan.exe`
+
+The download only starts after the checkbox confirmation and the install API also requires `confirmed: true`. For a manual or shared installation, put the portable package in one of these locations:
 
 - `tools\realesrgan-ncnn-vulkan\realesrgan-ncnn-vulkan.exe`
 - `work\tools\realesrgan-ncnn-vulkan\realesrgan-ncnn-vulkan.exe`

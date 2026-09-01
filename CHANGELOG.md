@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased - 2026-08-21
+
+### Features
+- Make the CorridorKey Chroma coarse-mask path inherit the current Chroma key mode, every manually selected background color, and the Chroma tolerance.
+- Keep the Chroma tolerance shared when switching between Chroma preview and CorridorKey with a Chroma coarse mask, while leaving the BiRefNet coarse-mask path independent.
+
+### Documentation
+- Add a README workflow explaining how to preview and tune a multi-color Chroma coarse mask before switching to CorridorKey.
+- Add screenshots for manual green-screen sampling and the resulting Chroma color/tolerance settings.
+
 ## 0.2.0 - 2026-06-07
 
 ### Features

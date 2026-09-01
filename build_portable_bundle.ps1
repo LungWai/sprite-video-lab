@@ -89,8 +89,6 @@ $projectFiles = @(
     "server.py",
     "start_sprite_video_lab_portable.bat",
     "README.md",
-    "USAGE.md",
-    "USAGE.zh-CN.md",
     "AI_MATTING.md",
     "LICENSE",
     "VERSION"
@@ -121,11 +119,16 @@ Get-ChildItem -LiteralPath $ffmpegRootResolved -Filter *.exe | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $ffmpegRuntimeRoot -Force
 }
 
-Write-Host "Copying AI models..."
+Write-Host "Copying AI support files without model weights..."
 $portableModelRoot = Join-Path $modelsRuntimeRoot "portable-models"
 Ensure-Directory -PathValue $portableModelRoot
-Copy-Tree -Source (Join-Path $modelRootResolved "huggingface") -Destination $portableModelRoot
-Copy-Tree -Source (Join-Path $modelRootResolved "CorridorKey") -Destination $portableModelRoot
+Copy-Tree -Source (Join-Path $modelRootResolved "EZ-CorridorKey") -Destination $portableModelRoot
+$portableCheckpointRoot = Join-Path $portableModelRoot "EZ-CorridorKey\CorridorKeyModule\checkpoints"
+if (Test-Path -LiteralPath $portableCheckpointRoot) {
+    Get-ChildItem -LiteralPath $portableCheckpointRoot -File -Force |
+        Where-Object { $_.Name -ne ".gitkeep" } |
+        Remove-Item -Force
+}
 
 $readmePath = Join-Path $bundleRoot "PORTABLE_README.txt"
 $readmeText = @"
@@ -140,8 +143,10 @@ This bundle includes:
 - Python runtime
 - ffmpeg / ffprobe
 - AI dependencies
-- BiRefNet model cache
-- CorridorKey code and checkpoints
+- CorridorKey support code
+
+AI model weights are not bundled. When an AI matting method is selected for the
+first time, the app asks for confirmation before downloading the required models.
 
 Notes:
 - Runtime outputs are written to the local work folder next to the launcher.

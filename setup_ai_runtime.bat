@@ -14,7 +14,8 @@ set "HF_XET_CACHE=%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%\xet"
 set "HF_HUB_DISABLE_SYMLINKS_WARNING=1"
 set "PIP_CACHE_DIR=%AI_ROOT%\pip-cache"
 set "VENV_DIR=%AI_ROOT%\venv"
-set "SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT=%AI_ROOT%\CorridorKey"
+set "SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT=%AI_ROOT%\EZ-CorridorKey"
+set "CORRIDORKEY_SOURCE_REVISION=35b6b75041dbe30c1bbdf8f9af2d91070a782774"
 
 if not exist "%AI_ROOT%" mkdir "%AI_ROOT%"
 
@@ -51,15 +52,28 @@ set "PYTHON_EXE=%VENV_DIR%\Scripts\python.exe"
 
 if not exist "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%\CorridorKeyModule" (
   for /f "delims=" %%i in ('where git 2^>nul') do (
-    echo Cloning CorridorKey to %SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%
-    git clone --depth 1 https://github.com/nikopueringer/CorridorKey "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%"
+    echo Installing verified EZ-CorridorKey source at %CORRIDORKEY_SOURCE_REVISION%
+    if not exist "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%" mkdir "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%"
+    git -C "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%" init
+    git -C "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%" remote remove origin >nul 2>nul
+    git -C "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%" remote add origin https://github.com/edenaion/EZ-CorridorKey
+    git -C "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%" fetch --depth 1 origin %CORRIDORKEY_SOURCE_REVISION%
+    if errorlevel 1 goto :corridorkey_install_failed
+    git -C "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%" checkout --detach FETCH_HEAD
+    if errorlevel 1 goto :corridorkey_install_failed
     goto :corridorkey_ready
   )
   echo CorridorKey was not cloned because git was not found.
-  echo Install git or clone https://github.com/nikopueringer/CorridorKey to %SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%
+  echo Install git or clone https://github.com/edenaion/EZ-CorridorKey to %SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%
+  goto :corridorkey_install_failed
 ) else (
   echo CorridorKey is available at %SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%
 )
+goto :corridorkey_ready
+
+:corridorkey_install_failed
+echo Failed to install the verified EZ-CorridorKey source revision.
+exit /b 1
 
 :corridorkey_ready
 

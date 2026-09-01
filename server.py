@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import cgi
+import colorsys
+import importlib.util
 import json
 import math
 import mimetypes
@@ -10,15 +12,18 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from datetime import datetime
 from fractions import Fraction
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from PIL import Image, ImageChops, ImageFilter
 
@@ -44,6 +49,10 @@ LINE_CLEANER_DIR = WORK_DIR / "line-cleaner"
 MAGIC_DIR = WORK_DIR / "magic"
 SETTINGS_PATH = WORK_DIR / "settings.json"
 LEGACY_SETTINGS_PATH = DEFAULT_WORK_DIR / "settings.json"
+MANAGED_RUNTIME_DIRS = (UPLOADS_DIR, JOBS_DIR, EXPORTS_DIR, PREVIEWS_DIR, LINE_CLEANER_DIR, MAGIC_DIR)
+GENERATED_EXPORT_DIR_PATTERN = re.compile(
+    r"^\d{8}-\d{6}-[0-9a-f]{4}-(?:export|magic-(?:half|quarter|eighth)-frames)$"
+)
 MAGIC_PREVIEW_LOCK = threading.Lock()
 
 DEFAULT_HOST = "127.0.0.1"
@@ -63,6 +72,10 @@ APP_VERSION_POLL_MS = 1200
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".gif"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 ANIMATION_FRAME_EXTENSIONS = IMAGE_EXTENSIONS
+WATERMARK_CORNER_BOXES = {
+    "top_left": (0.04, 0.02, 0.20, 0.13),
+    "bottom_right": (0.84, 0.88, 1.0, 1.0),
+}
 CONTENT_TYPE_EXTENSIONS = {
     "video/mp4": ".mp4",
     "video/quicktime": ".mov",
@@ -96,26 +109,25 @@ FFMPEG_ACCEL_ALIASES = {
 }
 AI_MATTE_MODEL_REPOS = {
     "birefnet-hr-matting": "ZhengPeng7/BiRefNet_HR-matting",
-    "birefnet-lite-2k": "ZhengPeng7/BiRefNet_lite-2K",
-    "birefnet-general": "ZhengPeng7/BiRefNet",
 }
 AI_MATTE_MODEL_LABELS = {
     "birefnet-hr-matting": "BiRefNet HR-matting",
-    "birefnet-lite-2k": "BiRefNet lite-2K",
-    "birefnet-general": "BiRefNet general",
 }
+BIREFNET_REQUIRED_FILES = (
+    "BiRefNet_config.py",
+    "birefnet.py",
+    "config.json",
+    "model.safetensors",
+)
 AI_MATTE_MODES = {
     "none",
     "chroma",
+    "luma",
     "birefnet",
     "corridorkey",
-    "luma",
-    "birefnet_corridorkey",
-    "birefnet_corridorkey_key",
-    "birefnet_luma",
-    "birefnet_luma_key",
-    "birefnet_luma_corridorkey",
 }
+BIREFNET_MATTE_MODES = {"birefnet"}
+CORRIDORKEY_MATTE_MODES = {"corridorkey"}
 AI_MATTE_DEVICE_ALIASES = {
     "": "auto",
     "auto": "auto",
@@ -125,6 +137,7 @@ AI_MATTE_DEVICE_ALIASES = {
     "cpu": "cpu",
 }
 DEFAULT_AI_MATTE_MODEL = "birefnet-hr-matting"
+BIREFNET_HR_MATTING_REVISION = "5d6b6f8adcb5b417c871b1d84ceaae9871355b7f"
 DEFAULT_AI_MATTE_RESOLUTION = 1024
 AI_MATTE_RESOLUTION_AUTO = "auto"
 AI_MATTE_MIN_RESOLUTION = 256
@@ -132,17 +145,45 @@ AI_MATTE_MAX_RESOLUTION = 2560
 AI_MATTE_RESOLUTION_MULTIPLE = 32
 OUTPUT_SCALE_MIN = 0.05
 OUTPUT_SCALE_MAX = 2.0
-CORRIDORKEY_REPO_URL = "https://github.com/nikopueringer/CorridorKey"
+CORRIDORKEY_REPO_URL = "https://github.com/edenaion/EZ-CorridorKey"
 CORRIDORKEY_IMG_SIZE = 2048
 CORRIDORKEY_GPU_DESPECKLE_PIXEL_LIMIT = 2**24
-CORRIDORKEY_SCREEN_COLORS = {"auto", "green", "blue"}
+CORRIDORKEY_COLOR_SPACES = {"srgb", "linear"}
+CORRIDORKEY_COARSE_MASKS = {"chroma", "birefnet"}
+CORRIDORKEY_SCREEN_COLORS = {"green", "blue"}
+CORRIDORKEY_DEFAULTS = {
+    "color_space": "srgb",
+    "despill_strength": 0.5,
+    "refiner_scale": 1.0,
+    "despeckle_enabled": True,
+    "despeckle_size": 400,
+    "garbage_matte_enabled": False,
+    "garbage_matte_px": 20,
+}
+CORRIDORKEY_TORCH_CHECKPOINTS = {
+    "green": (
+        "nikopueringer/CorridorKey_v1.0",
+        "CorridorKey_v1.0.pth",
+        "f6386ddf042d8e92aeb5fd16cb9b101cff508195",
+    ),
+    "blue": (
+        "nikopueringer/CorridorKeyBlue_1.0",
+        "CorridorKeyBlue_1.0.pth",
+        "51e6ccaa4b703f54be20a72ac2c37784fb9ba1cd",
+    ),
+}
 CANVAS_MODES = {"auto", "square_bottom", "square_center"}
 LINE_CLEANER_METHODS = {"classic", "realesrgan_anime"}
 REAL_ESRGAN_ANIME_MODEL = "realesrgan-x4plus-anime"
+REAL_ESRGAN_WINDOWS_PACKAGE_URL = (
+    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/"
+    "realesrgan-ncnn-vulkan-20220424-windows.zip"
+)
 MAGIC_CROP_PADDING = 24
 MAGIC_UPSCALE = 4
 MAGIC_ALPHA_LOSS_FALLBACK_RATIO = 0.05
 MAGIC_VARIANTS = (
+    {"key": "full", "label": "100%", "scale": 1.0, "dir": "frames-100"},
     {"key": "half", "label": "1/2", "scale": 0.5, "dir": "frames"},
     {"key": "quarter", "label": "1/4", "scale": 0.25, "dir": "frames-quarter"},
     {"key": "eighth", "label": "1/8", "scale": 0.125, "dir": "frames-eighth"},
@@ -152,16 +193,71 @@ MAGIC_RESIZE_MODES = {
     "hard": {"label": "硬", "resample": NEAREST},
     "soft": {"label": "软", "resample": BOX},
 }
+ALPHA_AWARE_DESPILL_RECOVERY_FLOOR = 0.055
+ALPHA_AWARE_DESPILL_CONFIDENCE_START = 0.035
+ALPHA_AWARE_DESPILL_CONFIDENCE_WIDTH = 0.16
+ALPHA_AWARE_DESPILL_RESIDUAL_STRENGTH = 0.78
+_SRGB_TO_LINEAR_LUT = tuple(
+    value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+    for value in (index / 255.0 for index in range(256))
+)
 
 _FFMPEG_HWACCELS_CACHE: set[str] | None = None
 _BIREFNET_MODEL_CACHE: dict[tuple[str, str], object] = {}
 _CORRIDORKEY_ENGINE_CACHE: dict[tuple[str, str], object] = {}
+_AI_INSTALL_LOCK = threading.Lock()
+_REALESRGAN_INSTALL_LOCK = threading.Lock()
 
 
 def ensure_runtime_dirs() -> None:
     for directory in (APP_DIR, WORK_DIR, UPLOADS_DIR, JOBS_DIR, EXPORTS_DIR, PREVIEWS_DIR, LINE_CLEANER_DIR, MAGIC_DIR):
         directory.mkdir(parents=True, exist_ok=True)
     migrate_legacy_settings()
+
+
+def clear_managed_runtime_files(confirmed: bool) -> dict:
+    if confirmed is not True:
+        raise ValueError("必须确认后才能清空 WebApp 文件。")
+
+    work_root = WORK_DIR.resolve()
+    runtime_targets = []
+    for directory in MANAGED_RUNTIME_DIRS:
+        target = directory.resolve()
+        if target.parent != work_root:
+            raise ValueError(f"拒绝清理 WebApp 工作目录之外的路径：{target}")
+        if target.exists() and not target.is_dir():
+            raise ValueError(f"运行目录不是文件夹：{target}")
+        runtime_targets.append(target)
+
+    export_targets = []
+    export_root = configured_exports_dir()
+    if export_root != EXPORTS_DIR.resolve() and export_root.exists():
+        if not export_root.is_dir():
+            raise ValueError(f"输出路径不是文件夹：{export_root}")
+        for child in export_root.iterdir():
+            if not GENERATED_EXPORT_DIR_PATTERN.fullmatch(child.name):
+                continue
+            target = child.resolve()
+            if target.parent != export_root or not target.is_dir():
+                raise ValueError(f"拒绝清理输出目录之外的路径：{target}")
+            export_targets.append(target)
+
+    cleared = []
+    for target in runtime_targets:
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=False, exist_ok=False)
+        cleared.append(target.name)
+
+    cleared_export_directories = []
+    for target in export_targets:
+        shutil.rmtree(target)
+        cleared_export_directories.append(target.name)
+
+    return {
+        "cleared": cleared,
+        "cleared_export_directories": cleared_export_directories,
+    }
 
 
 def migrate_legacy_settings() -> None:
@@ -320,8 +416,8 @@ def default_corridorkey_root() -> Path:
         return Path(configured).expanduser()
     e_drive = Path("E:/")
     if e_drive.exists():
-        return e_drive / "sprite-video-lab-models" / "CorridorKey"
-    return WORK_DIR / "models" / "CorridorKey"
+        return e_drive / "sprite-video-lab-models" / "EZ-CorridorKey"
+    return WORK_DIR / "models" / "EZ-CorridorKey"
 
 
 def configure_ai_model_cache() -> Path:
@@ -338,6 +434,160 @@ def configure_ai_model_cache() -> Path:
     os.environ.setdefault("HF_XET_CACHE", str(cache_dir / "xet"))
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
     return cache_dir
+
+
+def ai_components_for_matte_mode(
+    matte_mode: str,
+    corridorkey_coarse_mask: str = "chroma",
+) -> list[str]:
+    mode = normalize_matte_mode(str(matte_mode or ""), True)
+    components = []
+    if mode in BIREFNET_MATTE_MODES or (
+        mode in CORRIDORKEY_MATTE_MODES
+        and normalize_corridorkey_coarse_mask(corridorkey_coarse_mask) == "birefnet"
+    ):
+        components.append("birefnet")
+    if mode in CORRIDORKEY_MATTE_MODES:
+        components.append("corridorkey")
+    return components
+
+
+def huggingface_repo_is_cached(
+    repo_id: str,
+    required_files: tuple[str, ...] = (),
+    revision: str = "",
+) -> bool:
+    repo_dir = default_ai_model_cache_dir() / f"models--{repo_id.replace('/', '--')}"
+    snapshots_dir = repo_dir / "snapshots"
+    if not snapshots_dir.is_dir():
+        return False
+    candidates = [snapshots_dir / revision] if revision else list(snapshots_dir.iterdir())
+    for snapshot_dir in candidates:
+        if not snapshot_dir.is_dir():
+            continue
+        if required_files and all((snapshot_dir / filename).is_file() for filename in required_files):
+            return True
+        if not required_files and any(path.is_file() for path in snapshot_dir.rglob("*")):
+            return True
+    return False
+
+
+def corridorkey_checkpoint_is_cached(screen_color: str) -> bool:
+    checkpoint_dir = default_corridorkey_root() / "CorridorKeyModule" / "checkpoints"
+    color = normalize_corridorkey_screen(screen_color)
+    filename = CORRIDORKEY_TORCH_CHECKPOINTS[color][1]
+    path = checkpoint_dir / filename
+    return path.is_file() and path.stat().st_size > 0
+
+
+def missing_ai_dependency_names() -> list[str]:
+    required = ("torch", "torchvision", "transformers", "huggingface_hub", "safetensors", "numpy", "cv2")
+    return [name for name in required if importlib.util.find_spec(name) is None]
+
+
+def ai_model_install_status(
+    matte_mode: str,
+    model_key: str = DEFAULT_AI_MATTE_MODEL,
+    corridorkey_coarse_mask: str = "chroma",
+    corridorkey_screen: str = "green",
+) -> dict:
+    components = ai_components_for_matte_mode(matte_mode, corridorkey_coarse_mask)
+    normalized_model_key = normalize_ai_model_key(model_key)
+    dependencies_missing = missing_ai_dependency_names() if components else []
+    models = {}
+    if "birefnet" in components:
+        requested_repo = AI_MATTE_MODEL_REPOS[normalized_model_key]
+        models[normalized_model_key] = huggingface_repo_is_cached(
+            requested_repo,
+            BIREFNET_REQUIRED_FILES,
+            BIREFNET_HR_MATTING_REVISION,
+        )
+    if "corridorkey" in components:
+        screen_color = normalize_corridorkey_screen(corridorkey_screen)
+        source_ready = (default_corridorkey_root() / "CorridorKeyModule").is_dir()
+        models["corridorkey-source"] = source_ready
+        models[f"corridorkey-{screen_color}"] = corridorkey_checkpoint_is_cached(screen_color)
+    return {
+        "required": bool(components),
+        "installed": bool(components) and not dependencies_missing and all(models.values()),
+        "components": components,
+        "models": models,
+        "missing_dependencies": dependencies_missing,
+        "model_cache": str(default_ai_model_cache_dir()),
+        "corridorkey_root": str(default_corridorkey_root()),
+    }
+
+
+def download_birefnet_model(model_key: str) -> str:
+    normalized_model_key = normalize_ai_model_key(model_key)
+    repo_id = AI_MATTE_MODEL_REPOS[normalized_model_key]
+    cache_dir = configure_ai_model_cache()
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id=repo_id,
+        revision=BIREFNET_HR_MATTING_REVISION,
+        cache_dir=str(cache_dir),
+        allow_patterns=list(BIREFNET_REQUIRED_FILES),
+    )
+    return normalized_model_key
+
+
+def download_corridorkey_checkpoint(screen_color: str) -> str:
+    color = normalize_corridorkey_screen(screen_color)
+    repo_id, filename, revision = CORRIDORKEY_TORCH_CHECKPOINTS[color]
+    checkpoint_dir = default_corridorkey_root() / "CorridorKeyModule" / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    from huggingface_hub import hf_hub_download
+
+    hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        revision=revision,
+        local_dir=str(checkpoint_dir),
+    )
+    return color
+
+
+def require_ai_runtime_for_components(components: list[str]) -> None:
+    missing = missing_ai_dependency_names()
+    if missing:
+        raise RuntimeError(
+            f"AI 运行环境缺少 {', '.join(missing)}。请先运行 setup_ai_runtime.bat，或使用完整便携版。"
+        )
+    if "corridorkey" in components and not (default_corridorkey_root() / "CorridorKeyModule").is_dir():
+        raise RuntimeError("CorridorKey 支持文件尚未安装。请先运行 setup_ai_runtime.bat，或使用完整便携版。")
+
+
+def install_ai_models_for_matte_mode(
+    confirmed: bool,
+    matte_mode: str,
+    model_key: str = DEFAULT_AI_MATTE_MODEL,
+    corridorkey_coarse_mask: str = "chroma",
+    corridorkey_screen: str = "green",
+) -> dict:
+    if confirmed is not True:
+        raise ValueError("必须确认后才能安装 AI 模型。")
+    components = ai_components_for_matte_mode(matte_mode, corridorkey_coarse_mask)
+    if not components:
+        raise ValueError("当前抠图方法不需要安装 AI 模型。")
+
+    with _AI_INSTALL_LOCK:
+        require_ai_runtime_for_components(components)
+        installed = []
+        if "birefnet" in components:
+            normalized_model_key = normalize_ai_model_key(model_key)
+            download_birefnet_model(normalized_model_key)
+            installed.append(normalized_model_key)
+        if "corridorkey" in components:
+            screen_color = normalize_corridorkey_screen(corridorkey_screen)
+            download_corridorkey_checkpoint(screen_color)
+            installed.append(f"corridorkey-{screen_color}")
+
+        status = ai_model_install_status(matte_mode, model_key, corridorkey_coarse_mask, corridorkey_screen)
+        if not status["installed"]:
+            raise RuntimeError("AI 模型安装未完成，请检查网络和磁盘空间后重试。")
+        return {"installed_models": installed, "status": status}
 
 
 def clean_filename(name: str) -> str:
@@ -382,6 +632,27 @@ def parse_hex_color(raw: str) -> tuple[int, int, int]:
 
 def rgb_to_hex(rgb: tuple[int, int, int]) -> str:
     return f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+
+
+def normalize_manual_key_colors(
+    manual_key_hex: str,
+    manual_key_colors: list[str] | None,
+    limit: int = 12,
+) -> list[tuple[int, int, int]]:
+    raw_colors = manual_key_colors if isinstance(manual_key_colors, list) else [manual_key_hex]
+
+    colors: list[tuple[int, int, int]] = []
+    for raw_color in raw_colors:
+        try:
+            color = parse_hex_color(str(raw_color))
+        except ValueError:
+            continue
+        if color not in colors:
+            colors.append(color)
+        if len(colors) >= limit:
+            break
+
+    return colors
 
 
 def safe_int(value, default: int) -> int:
@@ -478,18 +749,7 @@ def target_size_from_source_height(source_height: int, output_scale: float) -> i
 
 def normalize_matte_mode(raw: str, chroma_enabled: bool) -> str:
     raw_value = str(raw or "").strip().lower()
-    compact_value = re.sub(r"\s+", "", raw_value)
-    dash_aliases = {
-        "birefnet-luma": "birefnet_luma_key",
-        "birefnet-luma-key": "birefnet_luma_key",
-        "birefnet-corridor": "birefnet_corridorkey_key",
-        "birefnet-corridor-key": "birefnet_corridorkey_key",
-        "birefnet-corridorkey": "birefnet_corridorkey_key",
-        "birefnet-corridorkey-key": "birefnet_corridorkey_key",
-    }
-    if raw_value in dash_aliases or compact_value in dash_aliases:
-        return dash_aliases.get(raw_value, dash_aliases[compact_value])
-    value = raw_value.replace("-", "_")
+    value = re.sub(r"\s+", "", raw_value).replace("-", "_")
     aliases = {
         "": "chroma" if chroma_enabled else "none",
         "off": "none",
@@ -507,32 +767,41 @@ def normalize_matte_mode(raw: str, chroma_enabled: bool) -> str:
         "corridor": "corridorkey",
         "corridor_key": "corridorkey",
         "corridorkey": "corridorkey",
+        "corridorkey_green": "corridorkey",
+        "corridorkey_blue": "corridorkey",
         "luma": "luma",
         "luma_key": "luma",
         "luminance": "luma",
-        "birefnet_corridor": "birefnet_corridorkey",
-        "birefnet_corridor_key": "birefnet_corridorkey",
-        "birefnet_corridorkey": "birefnet_corridorkey",
-        "birefnet+corridor": "birefnet_corridorkey",
-        "birefnet+corridorkey": "birefnet_corridorkey",
-        "birefnet_corridorkey_key": "birefnet_corridorkey_key",
-        "birefnet_corridor_keyer": "birefnet_corridorkey_key",
-        "birefnet_corridorkey_keyer": "birefnet_corridorkey_key",
-        "birefnet_luma": "birefnet_luma",
-        "birefnet+luma": "birefnet_luma",
-        "birefnet_luma_key": "birefnet_luma_key",
-        "birefnet_luma_keyer": "birefnet_luma_key",
-        "birefnet_luma_corridorkey": "birefnet_luma_corridorkey",
-        "birefnet_luma_corridor": "birefnet_luma_corridorkey",
-        "birefnet_luma_corridor_key": "birefnet_luma_corridorkey",
-        "birefnet_corridorkey_luma": "birefnet_luma_corridorkey",
-        "birefnet_corridor_luma": "birefnet_luma_corridorkey",
-        "birefnet+luma+corridor": "birefnet_luma_corridorkey",
-        "birefnet+luma+corridorkey": "birefnet_luma_corridorkey",
-        "birefnet+corridor+luma": "birefnet_luma_corridorkey",
-        "birefnet+corridorkey+luma": "birefnet_luma_corridorkey",
-        "ai_luma": "birefnet_luma",
-        "ai_glow": "birefnet_luma",
+        # Removed composite modes migrate to the closest standalone algorithm.
+        "chroma_birefnet": "chroma",
+        "chroma+birefnet": "chroma",
+        "chroma_biref": "chroma",
+        "chroma+biref": "chroma",
+        "birefnet_chroma": "chroma",
+        "birefnet+chroma": "chroma",
+        "birefnet_corridor": "corridorkey",
+        "birefnet_corridor_key": "corridorkey",
+        "birefnet_corridorkey": "corridorkey",
+        "birefnet+corridor": "corridorkey",
+        "birefnet+corridorkey": "corridorkey",
+        "birefnet_corridorkey_key": "corridorkey",
+        "birefnet_corridor_keyer": "corridorkey",
+        "birefnet_corridorkey_keyer": "corridorkey",
+        "birefnet_luma": "luma",
+        "birefnet+luma": "luma",
+        "birefnet_luma_key": "luma",
+        "birefnet_luma_keyer": "luma",
+        "birefnet_luma_corridorkey": "luma",
+        "birefnet_luma_corridor": "luma",
+        "birefnet_luma_corridor_key": "luma",
+        "birefnet_corridorkey_luma": "luma",
+        "birefnet_corridor_luma": "luma",
+        "birefnet+luma+corridor": "luma",
+        "birefnet+luma+corridorkey": "luma",
+        "birefnet+corridor+luma": "luma",
+        "birefnet+corridorkey+luma": "luma",
+        "ai_luma": "luma",
+        "ai_glow": "luma",
     }
     mode = aliases.get(value, value)
     return mode if mode in AI_MATTE_MODES else ("chroma" if chroma_enabled else "none")
@@ -544,11 +813,11 @@ def normalize_ai_model_key(raw: str) -> str:
         "hr": "birefnet-hr-matting",
         "hr-matting": "birefnet-hr-matting",
         "matting": "birefnet-hr-matting",
-        "lite": "birefnet-lite-2k",
-        "lite-2k": "birefnet-lite-2k",
-        "2k": "birefnet-lite-2k",
-        "general": "birefnet-general",
-        "default": "birefnet-general",
+        "lite": "birefnet-hr-matting",
+        "lite-2k": "birefnet-hr-matting",
+        "2k": "birefnet-hr-matting",
+        "general": "birefnet-hr-matting",
+        "default": "birefnet-hr-matting",
     }
     value = aliases.get(value, value)
     return value if value in AI_MATTE_MODEL_REPOS else DEFAULT_AI_MATTE_MODEL
@@ -560,8 +829,61 @@ def normalize_ai_device(raw: str) -> str:
 
 
 def normalize_corridorkey_screen(raw: str) -> str:
-    value = str(raw or "auto").strip().lower()
-    return value if value in CORRIDORKEY_SCREEN_COLORS else "auto"
+    value = str(raw or "green").strip().lower()
+    return value if value in CORRIDORKEY_SCREEN_COLORS else "green"
+
+
+def normalize_corridorkey_coarse_mask(raw: str) -> str:
+    value = str(raw or "chroma").strip().lower()
+    return value if value in CORRIDORKEY_COARSE_MASKS else "chroma"
+
+
+def normalize_corridorkey_options(raw: dict | None = None) -> dict:
+    values = raw if isinstance(raw, dict) else {}
+    color_space = str(values.get("color_space") or CORRIDORKEY_DEFAULTS["color_space"]).strip().lower()
+    if color_space not in CORRIDORKEY_COLOR_SPACES:
+        color_space = CORRIDORKEY_DEFAULTS["color_space"]
+    try:
+        despill_strength = float(values.get("despill_strength", CORRIDORKEY_DEFAULTS["despill_strength"]))
+    except (TypeError, ValueError):
+        despill_strength = CORRIDORKEY_DEFAULTS["despill_strength"]
+    try:
+        refiner_scale = float(values.get("refiner_scale", CORRIDORKEY_DEFAULTS["refiner_scale"]))
+    except (TypeError, ValueError):
+        refiner_scale = CORRIDORKEY_DEFAULTS["refiner_scale"]
+    try:
+        despeckle_size = int(values.get("despeckle_size", CORRIDORKEY_DEFAULTS["despeckle_size"]))
+    except (TypeError, ValueError):
+        despeckle_size = CORRIDORKEY_DEFAULTS["despeckle_size"]
+    try:
+        garbage_matte_px = int(values.get("garbage_matte_px", CORRIDORKEY_DEFAULTS["garbage_matte_px"]))
+    except (TypeError, ValueError):
+        garbage_matte_px = CORRIDORKEY_DEFAULTS["garbage_matte_px"]
+    return {
+        "color_space": color_space,
+        "despill_strength": max(0.0, min(1.0, despill_strength)),
+        "refiner_scale": max(0.0, min(3.0, refiner_scale)),
+        "despeckle_enabled": bool(values.get("despeckle_enabled", CORRIDORKEY_DEFAULTS["despeckle_enabled"])),
+        "despeckle_size": max(0, min(999999, despeckle_size)),
+        "garbage_matte_enabled": bool(
+            values.get("garbage_matte_enabled", CORRIDORKEY_DEFAULTS["garbage_matte_enabled"])
+        ),
+        "garbage_matte_px": max(1, min(500, garbage_matte_px)),
+    }
+
+
+def corridorkey_options_from_payload(payload: dict) -> dict:
+    return normalize_corridorkey_options(
+        {
+            "color_space": payload.get("corridorkey_color_space"),
+            "despill_strength": payload.get("corridorkey_despill_strength"),
+            "refiner_scale": payload.get("corridorkey_refiner_scale"),
+            "despeckle_enabled": payload.get("corridorkey_despeckle_enabled", True),
+            "despeckle_size": payload.get("corridorkey_despeckle_size"),
+            "garbage_matte_enabled": payload.get("corridorkey_garbage_matte_enabled", False),
+            "garbage_matte_px": payload.get("corridorkey_garbage_matte_px"),
+        }
+    )
 
 
 def normalize_canvas_mode(raw: str) -> str:
@@ -581,10 +903,7 @@ def normalize_canvas_mode(raw: str) -> str:
 
 
 def resolve_corridorkey_screen(raw: str, key_rgb: tuple[int, int, int]) -> str:
-    normalized = normalize_corridorkey_screen(raw)
-    if normalized != "auto":
-        return normalized
-    return "blue" if key_rgb[2] > key_rgb[1] and key_rgb[2] >= key_rgb[0] else "green"
+    return normalize_corridorkey_screen(raw)
 
 
 def resolve_ffmpeg_binary(name: str) -> str:
@@ -748,6 +1067,77 @@ def is_within_root(path: Path, root: Path) -> bool:
 def open_rgba_image(path: Path) -> Image.Image:
     with Image.open(path) as image:
         return image.convert("RGBA")
+
+
+def scaled_fraction_box(size: tuple[int, int], fractions: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
+    width, height = size
+    left, top, right, bottom = fractions
+    return (
+        max(0, min(width, round(width * left))),
+        max(0, min(height, round(height * top))),
+        max(0, min(width, round(width * right))),
+        max(0, min(height, round(height * bottom))),
+    )
+
+
+def watermark_corner_contrast_score(image: Image.Image, box: tuple[int, int, int, int]) -> int:
+    data = image.convert("RGB").crop(box).tobytes()
+    pixels = list(zip(data[0::3], data[1::3], data[2::3]))
+    if not pixels:
+        return 0
+
+    bins: dict[tuple[int, int, int], list[int]] = {}
+    for red, green, blue in pixels:
+        key = (red // 16, green // 16, blue // 16)
+        bucket = bins.setdefault(key, [0, 0, 0, 0])
+        bucket[0] += 1
+        bucket[1] += red
+        bucket[2] += green
+        bucket[3] += blue
+    dominant = max(bins.values(), key=lambda bucket: bucket[0])
+    background = tuple(round(dominant[index] / dominant[0]) for index in range(1, 4))
+    return sum(
+        1
+        for pixel in pixels
+        if sum(abs(pixel[index] - background[index]) for index in range(3)) >= 72
+    )
+
+
+def detect_watermark_corner(image: Image.Image) -> tuple[str | None, dict[str, int]]:
+    scores = {
+        name: watermark_corner_contrast_score(image, scaled_fraction_box(image.size, fractions))
+        for name, fractions in WATERMARK_CORNER_BOXES.items()
+    }
+    location = max(scores, key=scores.get)
+    box = scaled_fraction_box(image.size, WATERMARK_CORNER_BOXES[location])
+    box_area = max(1, (box[2] - box[0]) * (box[3] - box[1]))
+    if scores[location] < max(16, round(box_area * 0.01)):
+        return None, scores
+    return location, scores
+
+
+def remove_detected_watermarks(
+    source_frames: list[Image.Image],
+    processed_frames: list[Image.Image],
+) -> tuple[list[Image.Image], dict]:
+    cleaned_frames: list[Image.Image] = []
+    locations: list[str | None] = []
+    scores: list[dict[str, int]] = []
+    for source, processed in zip(source_frames, processed_frames):
+        location, frame_scores = detect_watermark_corner(source)
+        cleaned = processed.copy()
+        if location:
+            cleaned.paste((0, 0, 0, 0), scaled_fraction_box(cleaned.size, WATERMARK_CORNER_BOXES[location]))
+        cleaned_frames.append(cleaned)
+        locations.append(location)
+        scores.append(frame_scores)
+    return cleaned_frames, {
+        "enabled": True,
+        "mode": "per_frame_corner_box",
+        "removed_frames": sum(location is not None for location in locations),
+        "locations": locations,
+        "scores": scores,
+    }
 
 
 def watch_targets() -> list[Path]:
@@ -1423,20 +1813,25 @@ def chroma_key_frame(
     softness: int,
     despill_strength: float,
     halo_pixels: int,
+    key_rgbs: list[tuple[int, int, int]] | None = None,
 ) -> Image.Image:
     rgba = image.convert("RGBA")
+    source_has_transparency = rgba.getchannel("A").getextrema()[0] < 255
     output_pixels: list[tuple[int, int, int, int]] = []
-    k_r, k_g, k_b = key_rgb
+    active_key_rgbs = key_rgbs or [key_rgb]
     if softness <= 0:
         max_distance = max(threshold, 1)
     else:
         max_distance = threshold + softness
 
-    for r_value, g_value, b_value, _ in rgba.getdata():
-        dist = math.sqrt(
-            (r_value - k_r) ** 2
-            + (g_value - k_g) ** 2
-            + (b_value - k_b) ** 2
+    for r_value, g_value, b_value, source_alpha in rgba.getdata():
+        dist = min(
+            math.sqrt(
+                (r_value - key_r) ** 2
+                + (g_value - key_g) ** 2
+                + (b_value - key_b) ** 2
+            )
+            for key_r, key_g, key_b in active_key_rgbs
         )
         if dist <= threshold:
             alpha = 0
@@ -1444,6 +1839,9 @@ def chroma_key_frame(
             alpha = 255
         else:
             alpha = int(((dist - threshold) / softness) * 255)
+
+        if source_has_transparency:
+            alpha = int(round((source_alpha * alpha) / 255))
 
         max_rb = max(r_value, b_value)
         spill = max(0, g_value - max_rb)
@@ -1512,7 +1910,13 @@ def load_birefnet_model(model_key: str, requested_device: str):
             pass
 
     cache_dir = configure_ai_model_cache()
-    model = auto_model.from_pretrained(repo_id, trust_remote_code=True, cache_dir=str(cache_dir))
+    model = auto_model.from_pretrained(
+        repo_id,
+        revision=BIREFNET_HR_MATTING_REVISION,
+        trust_remote_code=True,
+        cache_dir=str(cache_dir),
+        local_files_only=True,
+    )
     model.to(device)
     model.eval()
     _BIREFNET_MODEL_CACHE[cache_key] = model
@@ -1554,6 +1958,12 @@ def import_corridorkey_dependencies():
         corridor_inference = importlib.import_module("CorridorKeyModule.inference_engine")
     except ModuleNotFoundError as exc:
         raise RuntimeError(f"CorridorKey inference engine could not be imported from {root}.") from exc
+
+    inference_defaults = getattr(corridor_inference, "INFERENCE_DEFAULTS", {})
+    if "garbage_matte_px" not in inference_defaults:
+        raise RuntimeError(
+            f"{root} 不是 EZ-CorridorKey。请运行 setup_ai_runtime.bat 安装 {CORRIDORKEY_REPO_URL}。"
+        )
 
     patch_corridorkey_gpu_despeckle(corridor_inference, torch)
 
@@ -1601,6 +2011,8 @@ def patch_corridorkey_gpu_despeckle(corridor_inference, torch_module) -> None:
 
 
 def load_corridorkey_engine(requested_device: str, screen_color: str):
+    if not corridorkey_checkpoint_is_cached(screen_color):
+        raise RuntimeError("CorridorKey 模型尚未安装，请重新选择该抠图方法并确认安装。")
     _np, torch_module, corridor_backend, root = import_corridorkey_dependencies()
     device = resolve_ai_runtime_device(torch_module, requested_device)
     cache_key = (device, screen_color)
@@ -1637,6 +2049,32 @@ def corridorkey_processed_to_image(processed) -> Image.Image:
     return Image.fromarray(rgba_u8, "RGBA")
 
 
+def preserve_corridorkey_opaque_source_rgb(
+    source: Image.Image,
+    refined: Image.Image,
+    opaque_threshold: int = 250,
+) -> Image.Image:
+    """Keep source color in solid subject interiors and CorridorKey color at edges."""
+    source_rgb = source.convert("RGB")
+    refined_rgba = refined.convert("RGBA")
+    if source_rgb.size != refined_rgba.size:
+        source_rgb = source_rgb.resize(refined_rgba.size, LANCZOS)
+
+    alpha = refined_rgba.getchannel("A")
+    interior = alpha.point(lambda value: 255 if value >= opaque_threshold else 0)
+    long_edge = max(refined_rgba.size)
+    scale = long_edge / 1920.0
+    erode_px = max(1, int(round(4 * scale)))
+    feather_px = max(1, int(round(2 * scale)))
+    interior = interior.filter(ImageFilter.MinFilter(erode_px * 2 + 1))
+    interior = interior.filter(ImageFilter.GaussianBlur(radius=feather_px))
+
+    preserved_rgb = Image.composite(source_rgb, refined_rgba.convert("RGB"), interior)
+    preserved = preserved_rgb.convert("RGBA")
+    preserved.putalpha(alpha)
+    return preserved
+
+
 def corridorkey_auto_despeckle_on_gpu(image: Image.Image) -> bool:
     return True
 
@@ -1649,22 +2087,20 @@ def corridorkey_process_arrays(
     engine,
     rgb,
     mask,
-    screen_channel: int,
-    despill_strength: float,
-    post_process_on_gpu: bool,
-    auto_despeckle: bool,
+    screen_color: str,
+    options: dict,
 ):
     result = engine.process_frame(
         rgb,
         mask,
-        input_is_linear=False,
+        refiner_scale=options["refiner_scale"],
+        input_is_linear=options["color_space"] == "linear",
         fg_is_straight=True,
-        despill_strength=max(0.0, min(1.0, float(despill_strength or 0.0))),
-        auto_despeckle=auto_despeckle,
-        despeckle_size=400,
-        generate_comp=False,
-        post_process_on_gpu=post_process_on_gpu,
-        screen_channel=screen_channel,
+        despill_strength=options["despill_strength"],
+        auto_despeckle=options["despeckle_enabled"],
+        despeckle_size=options["despeckle_size"],
+        screen_color=screen_color,
+        garbage_matte_px=options["garbage_matte_px"] if options["garbage_matte_enabled"] else 0,
     )
     return result
 
@@ -1684,39 +2120,39 @@ def corridorkey_refine_frame(
     alpha_mask: Image.Image,
     requested_device: str,
     screen_color: str,
-    despill_strength: float,
+    raw_options: dict | None = None,
 ) -> tuple[Image.Image, dict]:
     import numpy as np
 
+    options = normalize_corridorkey_options(raw_options)
     engine, device, root = load_corridorkey_engine(requested_device, screen_color)
-    screen_channel = 2 if screen_color == "blue" else 1
-    post_process_on_gpu = corridorkey_postprocess_on_gpu(device)
-    auto_despeckle = not post_process_on_gpu or corridorkey_auto_despeckle_on_gpu(image)
-    uses_safe_despeckle = post_process_on_gpu and (image.size[0] * image.size[1]) > CORRIDORKEY_GPU_DESPECKLE_PIXEL_LIMIT
     rgb = np.array(image.convert("RGB"), dtype=np.uint8, copy=True)
     mask = np.array(alpha_mask.convert("L"), dtype=np.uint8, copy=True)
     result = corridorkey_process_arrays(
         engine,
         rgb,
         mask,
-        screen_channel,
-        despill_strength,
-        post_process_on_gpu,
-        auto_despeckle,
+        screen_color,
+        options,
     )
-    alpha = corridorkey_alpha_to_image(result["processed"][..., 3:4])
-    refined = apply_alpha_mask(image, alpha)
-    refined = despill_alpha_edges(refined, auto_key_color(image), despill_strength)
+    refined = corridorkey_processed_to_image(result["processed"])
+    refined = preserve_corridorkey_opaque_source_rgb(image, refined)
 
     info = {
         "corridorkey_enabled": True,
-        "corridorkey_color_source": "original",
+        "corridorkey_implementation": "EZ-CorridorKey",
+        "corridorkey_color_source": "source-interior+ez-edge-foreground",
+        "corridorkey_rgb_processing": "source-interior-preserved+edge-reconstruction+edge-despill",
         "corridorkey_screen_color": screen_color,
         "corridorkey_device": device,
         "corridorkey_resolution": CORRIDORKEY_IMG_SIZE,
-        "corridorkey_post_process": "gpu" if post_process_on_gpu else "cpu",
-        "corridorkey_auto_despeckle": auto_despeckle,
-        "corridorkey_safe_despeckle": uses_safe_despeckle,
+        "corridorkey_color_space": options["color_space"],
+        "corridorkey_despill_strength": options["despill_strength"],
+        "corridorkey_refiner_scale": options["refiner_scale"],
+        "corridorkey_auto_despeckle": options["despeckle_enabled"],
+        "corridorkey_despeckle_size": options["despeckle_size"],
+        "corridorkey_garbage_matte_enabled": options["garbage_matte_enabled"],
+        "corridorkey_garbage_matte_px": options["garbage_matte_px"] if options["garbage_matte_enabled"] else 0,
         "corridorkey_tiled": False,
         "corridorkey_root": str(root),
     }
@@ -1749,13 +2185,6 @@ def birefnet_mask_score(mask: Image.Image) -> dict:
     }
 
 
-def is_weak_birefnet_mask(score: dict) -> bool:
-    max_alpha = int(score.get("max_alpha") or 0)
-    strong_ratio = float(score.get("strong_ratio") or 0.0)
-    visible_ratio = float(score.get("visible_ratio") or 0.0)
-    return max_alpha < 80 or (max_alpha < 128 and strong_ratio < 0.002 and visible_ratio < 0.08)
-
-
 def is_low_confidence_birefnet_mask(score: dict) -> bool:
     max_alpha = int(score.get("max_alpha") or 0)
     mean_alpha = float(score.get("mean_alpha") or 0.0)
@@ -1765,21 +2194,11 @@ def is_low_confidence_birefnet_mask(score: dict) -> bool:
         return True
     if visible_ratio <= 0.15:
         return False
+    if visible_ratio >= max(strong_ratio * 2.0, strong_ratio + 0.08) and mean_alpha < 36:
+        return True
     if strong_ratio >= 0.03:
         return False
     return mean_alpha < 36
-
-
-def should_use_birefnet_fallback(current_score: dict, fallback_score: dict) -> bool:
-    current_max = int(current_score.get("max_alpha") or 0)
-    fallback_max = int(fallback_score.get("max_alpha") or 0)
-    current_strong = float(current_score.get("strong_ratio") or 0.0)
-    fallback_strong = float(fallback_score.get("strong_ratio") or 0.0)
-    if fallback_max < 128:
-        return False
-    if fallback_max >= max(160, current_max * 2) and fallback_strong > current_strong:
-        return True
-    return current_max < 80 and fallback_strong >= 0.005
 
 
 def should_use_solid_background_fallback(
@@ -1872,6 +2291,7 @@ def birefnet_alpha_mask(
     inference_resolution: int | str | None,
     solid_fallback_threshold: int = 42,
     solid_fallback_softness: int = 8,
+    allow_solid_fallback: bool = True,
 ) -> tuple[Image.Image, dict]:
     normalized_model_key = normalize_ai_model_key(model_key)
     resolution = resolve_ai_resolution(inference_resolution, image)
@@ -1884,29 +2304,17 @@ def birefnet_alpha_mask(
     info["solid_key_fallback"] = False
     info["solid_key_color"] = ""
 
-    solid_fallback = solid_background_fallback_alpha(
-        image,
-        score,
-        solid_fallback_threshold,
-        solid_fallback_softness,
-    )
-    if solid_fallback is not None:
-        solid_mask, solid_info = solid_fallback
-        info.update(solid_info)
-        return solid_mask, info
-
-    fallback_model_key = "birefnet-general"
-    if normalized_model_key != fallback_model_key and (is_weak_birefnet_mask(score) or is_low_confidence_birefnet_mask(score)):
-        fallback_mask, fallback_info = run_birefnet_inference(image, fallback_model_key, requested_device, resolution)
-        fallback_score = birefnet_mask_score(fallback_mask)
-        if should_use_birefnet_fallback(score, fallback_score):
-            fallback_info["mask_score"] = fallback_score
-            fallback_info["requested_model_key"] = normalized_model_key
-            fallback_info["fallback_model_key"] = fallback_model_key
-            fallback_info["fallback_reason"] = "selected BiRefNet model produced a weak alpha mask"
-            fallback_info["solid_key_fallback"] = False
-            fallback_info["solid_key_color"] = ""
-            return fallback_mask, fallback_info
+    if allow_solid_fallback:
+        solid_fallback = solid_background_fallback_alpha(
+            image,
+            score,
+            solid_fallback_threshold,
+            solid_fallback_softness,
+        )
+        if solid_fallback is not None:
+            solid_mask, solid_info = solid_fallback
+            info.update(solid_info)
+            return solid_mask, info
 
     return mask, info
 
@@ -1992,6 +2400,118 @@ def apply_alpha_mask(image: Image.Image, alpha_mask: Image.Image) -> Image.Image
     return rgba
 
 
+def apply_alpha_preserve_source_rgb(image: Image.Image, alpha_mask: Image.Image) -> Image.Image:
+    """Apply alpha without altering any visible source RGB values."""
+    rgba = apply_alpha_mask(image, alpha_mask)
+    transparent_pixels = rgba.getchannel("A").point(lambda alpha: 255 if alpha == 0 else 0)
+    rgba.paste((0, 0, 0, 0), mask=transparent_pixels)
+    return rgba
+
+
+def linear_to_srgb_byte(value: float) -> int:
+    normalized = max(0.0, min(1.0, float(value)))
+    if normalized <= 0.0031308:
+        srgb = normalized * 12.92
+    else:
+        srgb = (1.055 * (normalized ** (1.0 / 2.4))) - 0.055
+    return max(0, min(255, round(srgb * 255.0)))
+
+
+def alpha_aware_despill_frame(
+    source_image: Image.Image,
+    matte_image: Image.Image,
+    key_rgb: tuple[int, int, int],
+) -> Image.Image:
+    """Recover straight foreground colour without changing the authored matte.
+
+    A keyed edge is an observed mixture C = alpha * F + (1 - alpha) * B.
+    The matte supplies alpha and ``key_rgb`` supplies B, so solve for F in
+    linear light. Fully opaque source pixels are copied verbatim, and fully
+    transparent pixels are zeroed to prevent hidden screen colour from leaking
+    into later resize filters.
+    """
+    source = source_image.convert("RGBA")
+    matte = matte_image.convert("RGBA")
+    if source.size != matte.size:
+        raise ValueError("alpha-aware despill requires source and matte sizes to match")
+
+    key_channels = tuple(max(0, min(255, int(value))) for value in key_rgb)
+    key_linear = tuple(_SRGB_TO_LINEAR_LUT[value] for value in key_channels)
+    spill_channel = max(range(3), key=lambda index: key_channels[index])
+    sorted_key_channels = sorted(key_channels, reverse=True)
+    has_dominant_screen_channel = sorted_key_channels[0] - sorted_key_channels[1] >= 24
+
+    output_pixels: list[tuple[int, int, int, int]] = []
+    alpha_values = matte.getchannel("A").getdata()
+    for source_pixel, alpha in zip(source.getdata(), alpha_values):
+        r_value, g_value, b_value, _source_alpha = source_pixel
+        if alpha <= 0:
+            output_pixels.append((0, 0, 0, 0))
+            continue
+        if alpha >= 254:
+            output_pixels.append((r_value, g_value, b_value, alpha))
+            continue
+
+        normalized_alpha = alpha / 255.0
+        safe_alpha = max(normalized_alpha, ALPHA_AWARE_DESPILL_RECOVERY_FLOOR)
+        observed_linear = (
+            _SRGB_TO_LINEAR_LUT[r_value],
+            _SRGB_TO_LINEAR_LUT[g_value],
+            _SRGB_TO_LINEAR_LUT[b_value],
+        )
+        recovered_linear = tuple(
+            max(
+                0.0,
+                min(
+                    1.0,
+                    (observed_linear[index] - ((1.0 - normalized_alpha) * key_linear[index]))
+                    / safe_alpha,
+                ),
+            )
+            for index in range(3)
+        )
+        confidence = max(
+            0.0,
+            min(
+                1.0,
+                (normalized_alpha - ALPHA_AWARE_DESPILL_CONFIDENCE_START)
+                / ALPHA_AWARE_DESPILL_CONFIDENCE_WIDTH,
+            ),
+        )
+        if has_dominant_screen_channel:
+            source_channels = (r_value, g_value, b_value)
+            other_source_values = [
+                value for index, value in enumerate(source_channels) if index != spill_channel
+            ]
+            source_spill = source_channels[spill_channel] - max(other_source_values)
+            contamination_weight = max(0.0, min(1.0, (source_spill + 8.0) / 24.0))
+            confidence *= contamination_weight
+        cleaned_channels = [
+            linear_to_srgb_byte(
+                (observed_linear[index] * (1.0 - confidence))
+                + (recovered_linear[index] * confidence)
+            )
+            for index in range(3)
+        ]
+
+        if has_dominant_screen_channel:
+            other_values = [
+                value for index, value in enumerate(cleaned_channels) if index != spill_channel
+            ]
+            spill = max(0, cleaned_channels[spill_channel] - max(other_values))
+            edge_weight = (1.0 - normalized_alpha) ** 0.60
+            reduction = round(spill * edge_weight * ALPHA_AWARE_DESPILL_RESIDUAL_STRENGTH)
+            cleaned_channels[spill_channel] = max(0, cleaned_channels[spill_channel] - reduction)
+
+        output_pixels.append(
+            (cleaned_channels[0], cleaned_channels[1], cleaned_channels[2], alpha)
+        )
+
+    cleaned = Image.new("RGBA", source.size)
+    cleaned.putdata(output_pixels)
+    return cleaned
+
+
 def despill_alpha_edges(
     image: Image.Image,
     key_rgb: tuple[int, int, int],
@@ -2031,6 +2551,29 @@ def despill_alpha_edges(
     return cleaned
 
 
+def restore_source_colors_after_matte(
+    source_images: list[Image.Image],
+    matte_frames: list[Image.Image],
+) -> list[Image.Image]:
+    """Keep a computed matte while rebuilding RGB from the uploaded frames.
+
+    Preprocessing may improve the alpha estimate, but its recoloured pixels must
+    not become the delivered artwork. Every visible RGB value comes from the
+    uploaded frame; only fully transparent hidden RGB is cleared.
+    """
+    if len(source_images) != len(matte_frames):
+        raise ValueError("source and matte frame counts must match")
+
+    restored_frames: list[Image.Image] = []
+    for source_image, matte_frame in zip(source_images, matte_frames):
+        source = source_image.convert("RGBA")
+        matte = matte_frame.convert("RGBA")
+        if source.size != matte.size:
+            raise ValueError("source and matte frame sizes must match")
+        restored_frames.append(apply_alpha_preserve_source_rgb(source, matte.getchannel("A")))
+    return restored_frames
+
+
 def apply_matte_pipeline(
     raw_images: list[Image.Image],
     chroma_enabled: bool,
@@ -2051,18 +2594,27 @@ def apply_matte_pipeline(
     luma_polarity: str,
     corridorkey_enabled: bool,
     corridorkey_screen: str,
+    manual_key_colors: list[str] | None = None,
+    corridorkey_options: dict | None = None,
+    corridorkey_coarse_mask: str = "chroma",
 ) -> tuple[list[Image.Image], tuple[int, int, int], dict]:
     if not raw_images:
         raise ValueError("no frames to matte")
 
     mode = normalize_matte_mode(matte_mode, chroma_enabled)
     key_rgb = auto_key_color(raw_images[0])
+    key_rgbs = [key_rgb]
     if key_mode == "manual":
-        key_rgb = parse_hex_color(manual_key_hex)
+        key_rgbs = normalize_manual_key_colors(manual_key_hex, manual_key_colors)
+        if not key_rgbs:
+            raise ValueError("manual background color requires at least one sample")
+        key_rgb = key_rgbs[0]
     normalized_luma_black = max(0, min(254, int(luma_black)))
     normalized_luma_white = max(normalized_luma_black + 1, min(255, int(luma_white)))
     normalized_luma_polarity = normalize_luma_polarity(luma_polarity)
     resolved_luma_polarity = resolve_luma_polarity(normalized_luma_polarity, key_rgb)
+    normalized_corridorkey_options = normalize_corridorkey_options(corridorkey_options)
+    normalized_corridorkey_coarse_mask = normalize_corridorkey_coarse_mask(corridorkey_coarse_mask)
     matte_info = {
         "mode": mode,
         "model_key": "",
@@ -2070,7 +2622,7 @@ def apply_matte_pipeline(
         "repo_id": "",
         "device": "",
         "resolution": 0,
-        "luma_enabled": mode in {"luma", "birefnet_luma", "birefnet_luma_key", "birefnet_luma_corridorkey"},
+        "luma_enabled": mode == "luma",
         "luma_black": normalized_luma_black,
         "luma_white": normalized_luma_white,
         "luma_gamma": max(0.05, float(luma_gamma or 1.0)),
@@ -2078,19 +2630,22 @@ def apply_matte_pipeline(
         "luma_polarity": normalized_luma_polarity,
         "luma_resolved_polarity": resolved_luma_polarity,
         "despill_strength": max(0.0, min(2.5, float(despill_strength or 0.0))),
+        "alpha_aware_despill": mode != "none",
+        "alpha_aware_despill_method": "linear_unmix" if mode != "none" else "",
         "halo_pixels": max(0, int(halo_pixels)),
         "corridorkey_enabled": False,
         "corridorkey_screen_color": "",
         "corridorkey_device": "",
         "corridorkey_resolution": 0,
+        "corridorkey_coarse_mask": normalized_corridorkey_coarse_mask if mode == "corridorkey" else "",
+        "alpha_merge": "",
+        "key_colors": [rgb_to_hex(color) for color in key_rgbs],
     }
-    mode_uses_corridorkey = mode in {
-        "corridorkey",
-        "birefnet_corridorkey",
-        "birefnet_corridorkey_key",
-        "birefnet_luma_corridorkey",
-    }
-    use_corridorkey = bool((corridorkey_enabled or mode_uses_corridorkey) and mode != "none")
+    mode_uses_corridorkey = mode == "corridorkey"
+    use_corridorkey = mode_uses_corridorkey
+    if use_corridorkey:
+        matte_info["alpha_aware_despill"] = False
+        matte_info["alpha_aware_despill_method"] = "ez-corridorkey"
     resolved_corridorkey_screen = resolve_corridorkey_screen(corridorkey_screen, key_rgb)
 
     if mode == "none":
@@ -2099,26 +2654,45 @@ def apply_matte_pipeline(
     if mode in {"chroma", "corridorkey"}:
         keyed_frames = []
         corridor_info: dict | None = None
+        coarse_ai_info: dict | None = None
+        resolved_ai_model = ai_model
         for raw_image in raw_images:
-            chroma_frame = chroma_key_frame(
-                image=raw_image,
-                key_rgb=key_rgb,
-                threshold=threshold,
-                softness=softness,
-                despill_strength=despill_strength,
-                halo_pixels=halo_pixels,
-            )
-            if use_corridorkey:
+            if mode == "corridorkey" and normalized_corridorkey_coarse_mask == "birefnet":
+                coarse_alpha, coarse_ai_info = birefnet_alpha_mask(
+                    raw_image,
+                    resolved_ai_model,
+                    ai_device,
+                    ai_resolution,
+                    threshold,
+                    softness,
+                    allow_solid_fallback=False,
+                )
+                resolved_ai_model = update_ai_model_after_fallback(resolved_ai_model, coarse_ai_info)
+            else:
+                chroma_frame = chroma_key_frame(
+                    image=raw_image,
+                    key_rgb=key_rgb,
+                    threshold=threshold,
+                    softness=softness,
+                    despill_strength=0.0,
+                    halo_pixels=halo_pixels,
+                    key_rgbs=key_rgbs if key_mode == "manual" else None,
+                )
+                coarse_alpha = chroma_frame.getchannel("A")
+            if mode == "corridorkey":
                 refined_frame, corridor_info = corridorkey_refine_frame(
                     raw_image,
-                    chroma_frame.getchannel("A"),
+                    coarse_alpha,
                     ai_device,
                     resolved_corridorkey_screen,
-                    matte_info["despill_strength"],
+                    normalized_corridorkey_options,
                 )
                 keyed_frames.append(refined_frame)
             else:
-                keyed_frames.append(chroma_frame)
+                frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
+                keyed_frames.append(alpha_aware_despill_frame(raw_image, chroma_frame, frame_key_rgb))
+        if coarse_ai_info:
+            matte_info.update(coarse_ai_info)
         if corridor_info:
             matte_info.update(corridor_info)
         return keyed_frames, key_rgb, matte_info
@@ -2139,13 +2713,13 @@ def apply_matte_pipeline(
                 filter_size = (matte_info["halo_pixels"] * 2) + 1
                 alpha = alpha.filter(ImageFilter.MinFilter(filter_size))
             keyed_frame = apply_alpha_mask(raw_image, alpha)
-            keyed_frame = despill_alpha_edges(keyed_frame, key_rgb, matte_info["despill_strength"])
+            frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
+            keyed_frame = alpha_aware_despill_frame(raw_image, keyed_frame, frame_key_rgb)
             keyed_frames.append(keyed_frame)
         return keyed_frames, key_rgb, matte_info
 
     keyed_frames: list[Image.Image] = []
     ai_info: dict | None = None
-    corridor_info: dict | None = None
     resolved_ai_model = ai_model
     for raw_image in raw_images:
         ai_alpha, ai_info = birefnet_alpha_mask(
@@ -2160,42 +2734,14 @@ def apply_matte_pipeline(
         if matte_info["halo_pixels"] > 0:
             filter_size = (matte_info["halo_pixels"] * 2) + 1
             ai_alpha = ai_alpha.filter(ImageFilter.MinFilter(filter_size))
-        if mode in {"birefnet_luma", "birefnet_luma_key", "birefnet_luma_corridorkey"}:
-            luma_alpha = luminance_alpha_mask(
-                raw_image,
-                matte_info["luma_black"],
-                max(matte_info["luma_black"] + 1, matte_info["luma_white"]),
-                matte_info["luma_gamma"],
-                matte_info["luma_strength"],
-                polarity=matte_info["luma_resolved_polarity"],
-                key_rgb=key_rgb,
-            )
-            if mode == "birefnet_luma_key":
-                alpha = ImageChops.darker(ai_alpha, luma_alpha)
-            else:
-                alpha = ImageChops.lighter(ai_alpha, luma_alpha)
-        else:
-            alpha = ai_alpha
-        if use_corridorkey:
-            keyed_frame, corridor_info = corridorkey_refine_frame(
-                raw_image,
-                alpha,
-                ai_device,
-                resolved_corridorkey_screen,
-                matte_info["despill_strength"],
-            )
-            if mode == "birefnet_corridorkey_key":
-                refined_alpha = ImageChops.darker(ai_alpha, keyed_frame.getchannel("A"))
-                keyed_frame.putalpha(refined_alpha)
-        else:
-            keyed_frame = apply_alpha_mask(raw_image, alpha)
-            keyed_frame = despill_alpha_edges(keyed_frame, key_rgb, matte_info["despill_strength"])
+        alpha = ai_alpha
+        frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
+        keyed_frame = apply_alpha_mask(raw_image, alpha)
+        keyed_frame = alpha_aware_despill_frame(raw_image, keyed_frame, frame_key_rgb)
         keyed_frames.append(keyed_frame)
 
     if ai_info:
         matte_info.update(ai_info)
-    if corridor_info:
-        matte_info.update(corridor_info)
     return keyed_frames, key_rgb, matte_info
 
 
@@ -2268,7 +2814,15 @@ def stable_resize_frames(
 
 
 def should_preserve_source_canvas(media_type: str, reduce_px: int, canvas_mode: str) -> bool:
+    if media_type == "video":
+        return True
     return media_type in {"image", "image_sequence"} and reduce_px <= 0 and normalize_canvas_mode(canvas_mode) == "auto"
+
+
+def effective_canvas_settings(media_type: str, reduce_px: int, canvas_mode: str) -> tuple[int, str]:
+    if media_type == "video":
+        return 0, "auto"
+    return reduce_px, normalize_canvas_mode(canvas_mode)
 
 
 def resize_frames_on_source_canvas(
@@ -2439,14 +2993,22 @@ def process_video_to_job(
     luma_polarity: str,
     corridorkey_enabled: bool,
     corridorkey_screen: str,
-    batch_green_to_black: bool = False,
-    batch_green_desaturate: bool = False,
+    preprocess_esr_smoothing: bool = False,
+    watermark_removal: bool = False,
+    batch_background_to_black: bool = False,
+    batch_background_desaturate: bool = False,
     batch_semitransparent_to_black: bool = False,
     batch_semitransparent_to_opaque: bool = False,
+    manual_key_colors: list[str] | None = None,
+    corridorkey_options: dict | None = None,
+    corridorkey_coarse_mask: str = "chroma",
     production_context: dict | None = None,
 ) -> dict:
+    if preprocess_esr_smoothing:
+        require_realesrgan_smoothing_ready()
     source_path, media_type = source_media_entry(upload_id)
     info = upload_media_info(upload_id, source_path, media_type)
+    reduce_px, canvas_mode = effective_canvas_settings(media_type, reduce_px, canvas_mode)
     start_time = max(0.0, start_time)
     duration = safe_float(info.get("duration"), 0.0)
     if media_type == "video" and duration > 0:
@@ -2504,6 +3066,19 @@ def process_video_to_job(
     output_scale = normalize_output_scale(output_scale)
     target_size = target_size_from_source_height(max(image.height for image in raw_images), output_scale)
 
+    preprocess_esr_info = {
+        "enabled": False,
+        "model": "",
+        "upscale": 1,
+        "restored_to_source_size": False,
+        "frame_count": 0,
+    }
+    if preprocess_esr_smoothing:
+        raw_images, preprocess_esr_info = preprocess_frames_with_realesrgan_smoothing(
+            raw_images,
+            root / "esr-smoothing",
+        )
+
     keyed_frames, key_rgb, matte_info = apply_matte_pipeline(
         raw_images=raw_images,
         chroma_enabled=chroma_enabled,
@@ -2524,8 +3099,17 @@ def process_video_to_job(
         luma_polarity=luma_polarity,
         corridorkey_enabled=corridorkey_enabled,
         corridorkey_screen=corridorkey_screen,
+        manual_key_colors=manual_key_colors,
+        corridorkey_options=corridorkey_options,
+        corridorkey_coarse_mask=corridorkey_coarse_mask,
     )
-
+    watermark_info = {"enabled": False, "removed_frames": 0, "locations": []}
+    if watermark_removal:
+        keyed_frames, watermark_info = remove_detected_watermarks(raw_images, keyed_frames)
+    key_rgbs = [
+        parse_hex_color(color)
+        for color in (matte_info.get("key_colors") or [rgb_to_hex(key_rgb)])
+    ]
     hard_alpha = matte_info["mode"] == "chroma" and softness == 0 and not matte_info["corridorkey_enabled"]
     if should_preserve_source_canvas(media_type, reduce_px, canvas_mode):
         rendered_frames, bboxes, scale, canvas_size = resize_frames_on_source_canvas(
@@ -2543,8 +3127,8 @@ def process_video_to_job(
         )
     frame_entries: list[dict] = []
     postprocess_changed = {
-        "green_to_black": 0,
-        "green_desaturate": 0,
+        "background_to_black": 0,
+        "background_desaturate": 0,
         "semitransparent_to_black": 0,
         "semitransparent_to_opaque": 0,
     }
@@ -2553,12 +3137,12 @@ def process_video_to_job(
         thumb_name = f"thumb_{index + 1:03d}.png"
         frame_path = processed_dir / frame_name
         thumb_path = thumbs_dir / thumb_name
-        if batch_green_to_black:
-            frame, changed = green_to_black_image(frame)
-            postprocess_changed["green_to_black"] += changed
-        if batch_green_desaturate:
-            frame, changed = green_desaturate_image(frame)
-            postprocess_changed["green_desaturate"] += changed
+        if batch_background_to_black:
+            frame, changed = background_to_black_image(frame, key_rgb, key_rgbs=key_rgbs)
+            postprocess_changed["background_to_black"] += changed
+        if batch_background_desaturate:
+            frame, changed = background_desaturate_image(frame, key_rgb, key_rgbs=key_rgbs)
+            postprocess_changed["background_desaturate"] += changed
         if batch_semitransparent_to_black:
             frame, changed = semitransparent_to_black_image(frame)
             postprocess_changed["semitransparent_to_black"] += changed
@@ -2610,14 +3194,25 @@ def process_video_to_job(
             "matte": matte_info,
             "key_mode": key_mode,
             "key_color": rgb_to_hex(key_rgb),
+            "key_colors": [rgb_to_hex(color) for color in key_rgbs],
+            "manual_key_colors": [rgb_to_hex(color) for color in key_rgbs] if key_mode == "manual" else [],
             "threshold": threshold,
             "softness": softness,
             "despill_strength": despill_strength,
             "halo_pixels": halo_pixels,
             "corridorkey_enabled": matte_info["corridorkey_enabled"],
+            "corridorkey_coarse_mask": matte_info.get(
+                "corridorkey_coarse_mask",
+                normalize_corridorkey_coarse_mask(corridorkey_coarse_mask),
+            ),
             "corridorkey_screen": matte_info["corridorkey_screen_color"],
-            "batch_green_to_black": bool(batch_green_to_black),
-            "batch_green_desaturate": bool(batch_green_desaturate),
+            "corridorkey_options": normalize_corridorkey_options(corridorkey_options),
+            "preprocess_esr_smoothing": bool(preprocess_esr_smoothing),
+            "preprocess_esr": preprocess_esr_info,
+            "watermark_removal": bool(watermark_removal),
+            "watermark": watermark_info,
+            "batch_background_to_black": bool(batch_background_to_black),
+            "batch_background_desaturate": bool(batch_background_desaturate),
             "batch_semitransparent_to_black": bool(batch_semitransparent_to_black),
             "batch_semitransparent_to_opaque": bool(batch_semitransparent_to_opaque),
             "postprocess_changed_pixels": postprocess_changed,
@@ -2652,39 +3247,103 @@ def save_preview_manifest(preview_id: str, manifest: dict) -> None:
     (root / "preview.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def is_green_residue_pixel(
+def is_background_residue_pixel(
     r_value: int,
     g_value: int,
     b_value: int,
     alpha: int,
+    key_rgb: tuple[int, int, int],
     threshold: int,
     dominance: int,
     alpha_floor: int,
 ) -> bool:
-    if alpha < alpha_floor:
+    # Background spill is only actionable on the matte edge. Fully opaque pixels
+    # belong to the retained subject, even when they match the screen color.
+    if alpha < alpha_floor or alpha >= 255:
         return False
 
-    raw_green_excess = g_value - max(r_value, b_value)
-    is_raw_green = g_value >= threshold and raw_green_excess >= dominance
-    if is_raw_green:
-        return True
+    key_channels = tuple(clamp_int(int(value), 0, 255) for value in key_rgb)
+    key_max = max(key_channels)
+    key_min = min(key_channels)
+    key_chroma = key_max - key_min
 
+    def matches(candidate: tuple[int, int, int]) -> bool:
+        candidate_max = max(candidate)
+        candidate_min = min(candidate)
+        candidate_chroma = candidate_max - candidate_min
+
+        if key_chroma >= dominance:
+            if candidate_max < threshold or candidate_chroma < dominance:
+                return False
+            key_hue = colorsys.rgb_to_hsv(*(value / 255.0 for value in key_channels))[0]
+            candidate_hue = colorsys.rgb_to_hsv(*(value / 255.0 for value in candidate))[0]
+            hue_distance = abs(key_hue - candidate_hue)
+            hue_distance = min(hue_distance, 1.0 - hue_distance)
+            return hue_distance <= 0.125
+
+        if candidate_chroma > dominance:
+            return False
+        key_value = round(sum(key_channels) / 3)
+        candidate_value = round(sum(candidate) / 3)
+        return abs(candidate_value - key_value) <= max(12, threshold)
+
+    raw_rgb = (r_value, g_value, b_value)
     if alpha <= 0:
         return False
 
     alpha_scale = 255.0 / alpha
-    scaled_r = min(255, round(r_value * alpha_scale))
-    scaled_g = min(255, round(g_value * alpha_scale))
-    scaled_b = min(255, round(b_value * alpha_scale))
-    scaled_green_excess = scaled_g - max(scaled_r, scaled_b)
-    return scaled_g >= threshold and scaled_green_excess >= dominance
+    straight_rgb = tuple(
+        min(255, round(value * alpha_scale))
+        for value in raw_rgb
+    )
+    raw_matches = matches(raw_rgb)
+    straight_matches = matches(straight_rgb)
+    if key_chroma < dominance:
+        raw_chroma = max(raw_rgb) - min(raw_rgb)
+        straight_chroma = max(straight_rgb) - min(straight_rgb)
+        return raw_chroma <= dominance and straight_chroma <= dominance and (raw_matches or straight_matches)
+    return raw_matches or straight_matches
 
 
-def green_to_black_image(
+def background_edge_candidate_mask(image: Image.Image, radius: int = 2) -> Image.Image:
+    alpha = image.convert("RGBA").getchannel("A")
+    transparent = alpha.point(lambda value: 255 if value == 0 else 0)
+    radius = max(1, int(radius))
+    return transparent.filter(ImageFilter.MaxFilter(radius * 2 + 1))
+
+
+def is_background_residue_for_any_key(
+    r_value: int,
+    g_value: int,
+    b_value: int,
+    alpha: int,
+    key_rgbs: list[tuple[int, int, int]],
+    threshold: int,
+    dominance: int,
+    alpha_floor: int,
+) -> bool:
+    return any(
+        is_background_residue_pixel(
+            r_value,
+            g_value,
+            b_value,
+            alpha,
+            key_rgb,
+            threshold,
+            dominance,
+            alpha_floor,
+        )
+        for key_rgb in key_rgbs
+    )
+
+
+def background_to_black_image(
     image: Image.Image,
+    key_rgb: tuple[int, int, int],
     threshold: int = 42,
     dominance: int = 24,
     alpha_floor: int = 1,
+    key_rgbs: list[tuple[int, int, int]] | None = None,
 ) -> tuple[Image.Image, int]:
     rgba = image.convert("RGBA")
     output_pixels: list[tuple[int, int, int, int]] = []
@@ -2692,9 +3351,22 @@ def green_to_black_image(
     threshold = max(0, min(255, int(threshold)))
     dominance = max(0, min(255, int(dominance)))
     alpha_floor = max(0, min(255, int(alpha_floor)))
+    edge_candidates = background_edge_candidate_mask(rgba)
 
-    for r_value, g_value, b_value, alpha in rgba.getdata():
-        if is_green_residue_pixel(r_value, g_value, b_value, alpha, threshold, dominance, alpha_floor):
+    for (r_value, g_value, b_value, alpha), is_background_edge in zip(
+        rgba.getdata(),
+        edge_candidates.getdata(),
+    ):
+        if is_background_edge and is_background_residue_for_any_key(
+            r_value,
+            g_value,
+            b_value,
+            alpha,
+            key_rgbs or [key_rgb],
+            threshold,
+            dominance,
+            alpha_floor,
+        ):
             output_pixels.append((0, 0, 0, alpha))
             changed += 1
         else:
@@ -2705,11 +3377,13 @@ def green_to_black_image(
     return cleaned, changed
 
 
-def green_desaturate_image(
+def background_desaturate_image(
     image: Image.Image,
+    key_rgb: tuple[int, int, int],
     threshold: int = 42,
     dominance: int = 24,
     alpha_floor: int = 1,
+    key_rgbs: list[tuple[int, int, int]] | None = None,
 ) -> tuple[Image.Image, int]:
     rgba = image.convert("RGBA")
     output_pixels: list[tuple[int, int, int, int]] = []
@@ -2717,9 +3391,22 @@ def green_desaturate_image(
     threshold = max(0, min(255, int(threshold)))
     dominance = max(0, min(255, int(dominance)))
     alpha_floor = max(0, min(255, int(alpha_floor)))
+    edge_candidates = background_edge_candidate_mask(rgba)
 
-    for r_value, g_value, b_value, alpha in rgba.getdata():
-        if is_green_residue_pixel(r_value, g_value, b_value, alpha, threshold, dominance, alpha_floor):
+    for (r_value, g_value, b_value, alpha), is_background_edge in zip(
+        rgba.getdata(),
+        edge_candidates.getdata(),
+    ):
+        if is_background_edge and is_background_residue_for_any_key(
+            r_value,
+            g_value,
+            b_value,
+            alpha,
+            key_rgbs or [key_rgb],
+            threshold,
+            dominance,
+            alpha_floor,
+        ):
             gray = clamp_int(round(0.299 * r_value + 0.587 * g_value + 0.114 * b_value), 0, 255)
             output_pixels.append((gray, gray, gray, alpha))
             changed += 1
@@ -2731,7 +3418,30 @@ def green_desaturate_image(
     return cleaned, changed
 
 
-def green_to_black_preview(preview_id: str, threshold: int = 42, dominance: int = 24) -> dict:
+def preview_background_key_rgb(preview: dict) -> tuple[int, int, int]:
+    try:
+        return parse_hex_color(str(preview.get("key_color") or "#00FF00"))
+    except ValueError:
+        return (0, 255, 0)
+
+
+def preview_background_key_rgbs(preview: dict) -> list[tuple[int, int, int]]:
+    key_colors = preview.get("key_colors")
+    if isinstance(key_colors, list):
+        colors: list[tuple[int, int, int]] = []
+        for raw_color in key_colors:
+            try:
+                color = parse_hex_color(str(raw_color))
+            except ValueError:
+                continue
+            if color not in colors:
+                colors.append(color)
+        if colors:
+            return colors
+    return [preview_background_key_rgb(preview)]
+
+
+def background_to_black_preview(preview_id: str, threshold: int = 42, dominance: int = 24) -> dict:
     preview = load_preview_manifest(preview_id)
     root = preview_dir(preview["preview_id"])
     processed_path = root / "processed.png"
@@ -2739,24 +3449,32 @@ def green_to_black_preview(preview_id: str, threshold: int = 42, dominance: int 
         raise FileNotFoundError(f"processed preview missing: {processed_path}")
 
     image = open_rgba_image(processed_path)
-    cleaned, changed = green_to_black_image(image, threshold=threshold, dominance=dominance)
+    key_rgb = preview_background_key_rgb(preview)
+    cleaned, changed = background_to_black_image(
+        image,
+        key_rgb,
+        threshold=threshold,
+        dominance=dominance,
+        key_rgbs=preview_background_key_rgbs(preview),
+    )
     image.close()
     cleaned.save(processed_path)
     cleaned.close()
 
     postprocess = preview.setdefault("postprocess", {})
-    green_black = postprocess.setdefault("green_to_black", {})
-    green_black["enabled"] = True
-    green_black["threshold"] = max(0, min(255, int(threshold)))
-    green_black["dominance"] = max(0, min(255, int(dominance)))
-    green_black["changed_pixels"] = changed
-    green_black["updated_at"] = iso_now()
+    background_black = postprocess.setdefault("background_to_black", {})
+    background_black["enabled"] = True
+    background_black["key_color"] = rgb_to_hex(key_rgb)
+    background_black["threshold"] = max(0, min(255, int(threshold)))
+    background_black["dominance"] = max(0, min(255, int(dominance)))
+    background_black["changed_pixels"] = changed
+    background_black["updated_at"] = iso_now()
     preview["processed_url"] = f"/work/previews/{preview['preview_id']}/processed.png?ts={int(time.time() * 1000)}"
     save_preview_manifest(preview["preview_id"], preview)
     return preview
 
 
-def green_desaturate_preview(preview_id: str, threshold: int = 42, dominance: int = 24) -> dict:
+def background_desaturate_preview(preview_id: str, threshold: int = 42, dominance: int = 24) -> dict:
     preview = load_preview_manifest(preview_id)
     root = preview_dir(preview["preview_id"])
     processed_path = root / "processed.png"
@@ -2764,21 +3482,47 @@ def green_desaturate_preview(preview_id: str, threshold: int = 42, dominance: in
         raise FileNotFoundError(f"processed preview missing: {processed_path}")
 
     image = open_rgba_image(processed_path)
-    cleaned, changed = green_desaturate_image(image, threshold=threshold, dominance=dominance)
+    key_rgb = preview_background_key_rgb(preview)
+    cleaned, changed = background_desaturate_image(
+        image,
+        key_rgb,
+        threshold=threshold,
+        dominance=dominance,
+        key_rgbs=preview_background_key_rgbs(preview),
+    )
     image.close()
     cleaned.save(processed_path)
     cleaned.close()
 
     postprocess = preview.setdefault("postprocess", {})
-    green_desaturate = postprocess.setdefault("green_desaturate", {})
-    green_desaturate["enabled"] = True
-    green_desaturate["threshold"] = max(0, min(255, int(threshold)))
-    green_desaturate["dominance"] = max(0, min(255, int(dominance)))
-    green_desaturate["changed_pixels"] = changed
-    green_desaturate["updated_at"] = iso_now()
+    background_desaturate = postprocess.setdefault("background_desaturate", {})
+    background_desaturate["enabled"] = True
+    background_desaturate["key_color"] = rgb_to_hex(key_rgb)
+    background_desaturate["threshold"] = max(0, min(255, int(threshold)))
+    background_desaturate["dominance"] = max(0, min(255, int(dominance)))
+    background_desaturate["changed_pixels"] = changed
+    background_desaturate["updated_at"] = iso_now()
     preview["processed_url"] = f"/work/previews/{preview['preview_id']}/processed.png?ts={int(time.time() * 1000)}"
     save_preview_manifest(preview["preview_id"], preview)
     return preview
+
+
+def green_to_black_image(
+    image: Image.Image,
+    threshold: int = 42,
+    dominance: int = 24,
+    alpha_floor: int = 1,
+) -> tuple[Image.Image, int]:
+    return background_to_black_image(image, (0, 255, 0), threshold, dominance, alpha_floor)
+
+
+def green_desaturate_image(
+    image: Image.Image,
+    threshold: int = 42,
+    dominance: int = 24,
+    alpha_floor: int = 1,
+) -> tuple[Image.Image, int]:
+    return background_desaturate_image(image, (0, 255, 0), threshold, dominance, alpha_floor)
 
 
 def semitransparent_to_black_image(
@@ -2902,13 +3646,21 @@ def preview_frame(
     luma_polarity: str,
     corridorkey_enabled: bool,
     corridorkey_screen: str,
-    batch_green_to_black: bool = False,
-    batch_green_desaturate: bool = False,
+    preprocess_esr_smoothing: bool = False,
+    watermark_removal: bool = False,
+    batch_background_to_black: bool = False,
+    batch_background_desaturate: bool = False,
     batch_semitransparent_to_black: bool = False,
     batch_semitransparent_to_opaque: bool = False,
+    manual_key_colors: list[str] | None = None,
+    corridorkey_options: dict | None = None,
+    corridorkey_coarse_mask: str = "chroma",
 ) -> dict:
+    if preprocess_esr_smoothing:
+        require_realesrgan_smoothing_ready()
     source_path, media_type = source_media_entry(upload_id)
     info = upload_media_info(upload_id, source_path, media_type)
+    reduce_px, canvas_mode = effective_canvas_settings(media_type, reduce_px, canvas_mode)
     duration = safe_float(info.get("duration"), 0.0)
     if media_type == "video" and duration > 0:
         sample_time = clamp_float(sample_time, 0.0, duration)
@@ -2943,6 +3695,20 @@ def preview_frame(
 
     raw_image.save(source_preview_path)
 
+    preprocess_esr_info = {
+        "enabled": False,
+        "model": "",
+        "upscale": 1,
+        "restored_to_source_size": False,
+        "frame_count": 0,
+    }
+    if preprocess_esr_smoothing:
+        smoothed_frames, preprocess_esr_info = preprocess_frames_with_realesrgan_smoothing(
+            [raw_image],
+            root / "esr-smoothing",
+        )
+        raw_image = smoothed_frames[0]
+
     keyed_frames, key_rgb, matte_info = apply_matte_pipeline(
         raw_images=[raw_image],
         chroma_enabled=chroma_enabled,
@@ -2963,7 +3729,17 @@ def preview_frame(
         luma_polarity=luma_polarity,
         corridorkey_enabled=corridorkey_enabled,
         corridorkey_screen=corridorkey_screen,
+        manual_key_colors=manual_key_colors,
+        corridorkey_options=corridorkey_options,
+        corridorkey_coarse_mask=corridorkey_coarse_mask,
     )
+    watermark_info = {"enabled": False, "removed_frames": 0, "locations": []}
+    if watermark_removal:
+        keyed_frames, watermark_info = remove_detected_watermarks([raw_image], keyed_frames)
+    key_rgbs = [
+        parse_hex_color(color)
+        for color in (matte_info.get("key_colors") or [rgb_to_hex(key_rgb)])
+    ]
     keyed_image = keyed_frames[0]
 
     hard_alpha = matte_info["mode"] == "chroma" and softness == 0 and not matte_info["corridorkey_enabled"]
@@ -2983,17 +3759,17 @@ def preview_frame(
         )
     rendered_frame = rendered_frames[0]
     postprocess_changed = {
-        "green_to_black": 0,
-        "green_desaturate": 0,
+        "background_to_black": 0,
+        "background_desaturate": 0,
         "semitransparent_to_black": 0,
         "semitransparent_to_opaque": 0,
     }
-    if batch_green_to_black:
-        rendered_frame, changed = green_to_black_image(rendered_frame)
-        postprocess_changed["green_to_black"] += changed
-    if batch_green_desaturate:
-        rendered_frame, changed = green_desaturate_image(rendered_frame)
-        postprocess_changed["green_desaturate"] += changed
+    if batch_background_to_black:
+        rendered_frame, changed = background_to_black_image(rendered_frame, key_rgb, key_rgbs=key_rgbs)
+        postprocess_changed["background_to_black"] += changed
+    if batch_background_desaturate:
+        rendered_frame, changed = background_desaturate_image(rendered_frame, key_rgb, key_rgbs=key_rgbs)
+        postprocess_changed["background_desaturate"] += changed
     if batch_semitransparent_to_black:
         rendered_frame, changed = semitransparent_to_black_image(rendered_frame)
         postprocess_changed["semitransparent_to_black"] += changed
@@ -3013,6 +3789,7 @@ def preview_frame(
         "source_url": f"/work/previews/{preview_id}/source.png",
         "processed_url": f"/work/previews/{preview_id}/processed.png",
         "key_color": rgb_to_hex(key_rgb),
+        "key_colors": [rgb_to_hex(color) for color in key_rgbs],
         "matte": matte_info,
         "ffmpeg_accel": ffmpeg_accel,
         "scale": scale,
@@ -3028,14 +3805,24 @@ def preview_frame(
             "chroma_enabled": chroma_enabled,
             "matte_mode": matte_info["mode"],
             "key_mode": key_mode,
+            "manual_key_colors": [rgb_to_hex(color) for color in key_rgbs] if key_mode == "manual" else [],
             "threshold": threshold,
             "softness": softness,
             "despill_strength": despill_strength,
             "halo_pixels": halo_pixels,
             "corridorkey_enabled": matte_info["corridorkey_enabled"],
+            "corridorkey_coarse_mask": matte_info.get(
+                "corridorkey_coarse_mask",
+                normalize_corridorkey_coarse_mask(corridorkey_coarse_mask),
+            ),
             "corridorkey_screen": matte_info["corridorkey_screen_color"],
-            "batch_green_to_black": bool(batch_green_to_black),
-            "batch_green_desaturate": bool(batch_green_desaturate),
+            "corridorkey_options": normalize_corridorkey_options(corridorkey_options),
+            "preprocess_esr_smoothing": bool(preprocess_esr_smoothing),
+            "preprocess_esr": preprocess_esr_info,
+            "watermark_removal": bool(watermark_removal),
+            "watermark": watermark_info,
+            "batch_background_to_black": bool(batch_background_to_black),
+            "batch_background_desaturate": bool(batch_background_desaturate),
             "batch_semitransparent_to_black": bool(batch_semitransparent_to_black),
             "batch_semitransparent_to_opaque": bool(batch_semitransparent_to_opaque),
             "postprocess_changed_pixels": postprocess_changed,
@@ -3119,6 +3906,7 @@ def save_preview_as_job(preview_id: str) -> dict:
             "halo_pixels": options.get("halo_pixels") or 0,
             "corridorkey_enabled": bool(options.get("corridorkey_enabled", False)),
             "corridorkey_screen": options.get("corridorkey_screen") or "auto",
+            "corridorkey_options": normalize_corridorkey_options(options.get("corridorkey_options")),
             "scale": preview.get("scale") or 1,
         },
         "frame_count": 1,
@@ -3302,6 +4090,96 @@ def resolve_realesrgan_model_dir(binary: str | None = None) -> Path | None:
         if param_path.exists() and bin_path.exists():
             return path
     return None
+
+
+def realesrgan_install_target_dir() -> Path:
+    return WORK_DIR / "tools" / "realesrgan-ncnn-vulkan"
+
+
+def realesrgan_install_status() -> dict:
+    binary = resolve_realesrgan_binary()
+    model_dir = resolve_realesrgan_model_dir(binary)
+    missing = []
+    if not binary:
+        missing.append("realesrgan-ncnn-vulkan.exe")
+    if not model_dir:
+        missing.extend(
+            [
+                f"models/{REAL_ESRGAN_ANIME_MODEL}.param",
+                f"models/{REAL_ESRGAN_ANIME_MODEL}.bin",
+            ]
+        )
+    return {
+        "installed": bool(binary and model_dir),
+        "binary": binary or "",
+        "model_dir": str(model_dir) if model_dir else "",
+        "target_dir": str(realesrgan_install_target_dir()),
+        "missing": missing,
+    }
+
+
+def download_realesrgan_windows_package(destination: Path) -> None:
+    request = Request(
+        REAL_ESRGAN_WINDOWS_PACKAGE_URL,
+        headers={"User-Agent": "Sprite-Video-Lab/Real-ESRGAN-Installer"},
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with urlopen(request, timeout=120) as response, destination.open("wb") as output:
+        shutil.copyfileobj(response, output)
+
+
+def extract_realesrgan_package(package_path: Path, extract_dir: Path) -> Path:
+    extract_root = extract_dir.resolve()
+    with zipfile.ZipFile(package_path) as archive:
+        for member in archive.infolist():
+            target = (extract_root / member.filename).resolve()
+            if target != extract_root and extract_root not in target.parents:
+                raise RuntimeError("Real-ESRGAN 安装包包含不安全路径，已停止安装。")
+        archive.extractall(extract_root)
+
+    executable_paths = list(extract_root.rglob("realesrgan-ncnn-vulkan.exe"))
+    if len(executable_paths) != 1:
+        raise RuntimeError("Real-ESRGAN 安装包中没有找到唯一的 Windows 可执行文件。")
+    package_root = executable_paths[0].parent
+    model_dir = package_root / "models"
+    required_models = (
+        model_dir / f"{REAL_ESRGAN_ANIME_MODEL}.param",
+        model_dir / f"{REAL_ESRGAN_ANIME_MODEL}.bin",
+    )
+    if not all(path.is_file() and path.stat().st_size > 0 for path in required_models):
+        raise RuntimeError("Real-ESRGAN 安装包缺少 anime 模型文件。")
+    return package_root
+
+
+def install_realesrgan_runtime(confirmed: bool) -> dict:
+    if confirmed is not True:
+        raise ValueError("必须确认后才能下载并安装 Real-ESRGAN。")
+
+    with _REALESRGAN_INSTALL_LOCK:
+        current_status = realesrgan_install_status()
+        if current_status["installed"]:
+            return {"downloaded": False, "status": current_status}
+
+        target_dir = realesrgan_install_target_dir()
+        tools_dir = target_dir.parent
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".realesrgan-install-", dir=tools_dir) as temp_dir:
+            temp_root = Path(temp_dir)
+            package_path = temp_root / "realesrgan-windows.zip"
+            extract_dir = temp_root / "extracted"
+            extract_dir.mkdir()
+            download_realesrgan_windows_package(package_path)
+            package_root = extract_realesrgan_package(package_path, extract_dir)
+            shutil.copytree(package_root, target_dir, dirs_exist_ok=True)
+
+        status = realesrgan_install_status()
+        if not status["installed"]:
+            raise RuntimeError("Real-ESRGAN 安装未完成，请检查网络和磁盘空间后重试。")
+        return {
+            "downloaded": True,
+            "source": REAL_ESRGAN_WINDOWS_PACKAGE_URL,
+            "status": status,
+        }
 
 
 def realesrgan_missing_message() -> str:
@@ -3501,11 +4379,131 @@ def run_realesrgan_anime(input_path: Path, output_path: Path, output_scale: int 
         raise RuntimeError("Real-ESRGAN anime did not produce an output image")
 
 
+def require_realesrgan_smoothing_ready() -> None:
+    binary = resolve_realesrgan_binary()
+    if not binary or not resolve_realesrgan_model_dir(binary):
+        raise RuntimeError(
+            "“先做平滑处理”需要 Real-ESRGAN anime，当前没有找到可执行文件或模型。"
+            "请重新勾选该选项并确认自动安装。"
+        )
+
+
+def smooth_source_frame_with_realesrgan(
+    image: Image.Image,
+    ai_input_path: Path,
+    ai_output_path: Path,
+    restored_path: Path | None = None,
+) -> Image.Image:
+    source_rgba = image.convert("RGBA")
+    source_size = source_rgba.size
+    ai_input_path.parent.mkdir(parents=True, exist_ok=True)
+    ai_output_path.parent.mkdir(parents=True, exist_ok=True)
+    prepare_realesrgan_rgb_input(source_rgba).save(ai_input_path)
+    run_realesrgan_anime(
+        ai_input_path,
+        ai_output_path,
+        output_scale=MAGIC_UPSCALE,
+    )
+
+    with Image.open(ai_output_path) as upscaled_image:
+        restored_rgb = upscaled_image.convert("RGB").resize(source_size, LANCZOS)
+    alpha = source_rgba.getchannel("A")
+    restored = Image.merge("RGBA", (*restored_rgb.split(), alpha))
+    if restored_path is not None:
+        restored_path.parent.mkdir(parents=True, exist_ok=True)
+        restored.save(restored_path, optimize=True, compress_level=9)
+    return restored
+
+
+def preprocess_frames_with_realesrgan_smoothing(
+    frames: list[Image.Image],
+    root: Path,
+) -> tuple[list[Image.Image], dict]:
+    require_realesrgan_smoothing_ready()
+    ai_input_dir = root / "ai-input"
+    ai_output_dir = root / "ai-output"
+    restored_dir = root / "restored"
+    smoothed_frames: list[Image.Image] = []
+    for index, frame in enumerate(frames, start=1):
+        frame_name = f"frame_{index:05d}.png"
+        smoothed_frames.append(
+            smooth_source_frame_with_realesrgan(
+                frame,
+                ai_input_dir / frame_name,
+                ai_output_dir / frame_name,
+                restored_dir / frame_name,
+            )
+        )
+    return smoothed_frames, {
+        "enabled": True,
+        "model": REAL_ESRGAN_ANIME_MODEL,
+        "upscale": MAGIC_UPSCALE,
+        "restored_to_source_size": True,
+        "frame_count": len(smoothed_frames),
+        "root": str(root),
+    }
+
+
 def resolve_magic_variant_dir(manifest: dict, variant: dict) -> Path:
     source_dir = Path(str(variant.get("frames_dir") or ""))
     if not source_dir.is_absolute():
         source_dir = MAGIC_DIR / f"{manifest['magic_id']}-magic" / str(source_dir)
     return source_dir
+
+
+def normalize_magic_variant_keys(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    available = {str(variant["key"]) for variant in MAGIC_VARIANTS}
+    if values is None:
+        return [str(variant["key"]) for variant in MAGIC_VARIANTS]
+    requested = [str(value or "").strip().lower() for value in (values or [])]
+    normalized: list[str] = []
+    for key in requested:
+        if key in available and key not in normalized:
+            normalized.append(key)
+    return normalized or ["half"]
+
+
+def magic_esr_cache_path(job_id: str, frame_index: int) -> Path:
+    safe_job_id = str(job_id or "").strip()
+    if not safe_job_id or Path(safe_job_id).name != safe_job_id:
+        raise ValueError("invalid job id for ESR cache")
+    return (
+        MAGIC_DIR
+        / "_esr-cache"
+        / safe_job_id
+        / REAL_ESRGAN_ANIME_MODEL
+        / f"source_{frame_index + 1:06d}.png"
+    )
+
+
+def load_magic_esr_cache(job_id: str, frame_index: int, source_size: tuple[int, int]) -> Image.Image | None:
+    cache_path = magic_esr_cache_path(job_id, frame_index)
+    if not cache_path.is_file():
+        return None
+    try:
+        with Image.open(cache_path) as cached:
+            rgba = cached.convert("RGBA")
+        expected_size = (source_size[0] * MAGIC_UPSCALE, source_size[1] * MAGIC_UPSCALE)
+        if rgba.size != expected_size:
+            rgba.close()
+            return None
+        return rgba
+    except (OSError, ValueError):
+        return None
+
+
+def save_magic_esr_cache(job_id: str, frame_index: int, image: Image.Image) -> Path:
+    cache_path = magic_esr_cache_path(job_id, frame_index)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(cache_path, optimize=False, compress_level=6)
+    return cache_path
+
+
+def link_or_copy_file(source_path: Path, target_path: Path) -> None:
+    try:
+        os.link(source_path, target_path)
+    except OSError:
+        shutil.copy2(source_path, target_path)
 
 
 def find_cached_magic_frames(
@@ -3551,39 +4549,23 @@ def find_cached_magic_frames(
         if normalize_magic_resize_mode(manifest.get("resize_mode")) != resize_mode:
             continue
 
-        variant_sources: dict[str, dict[int, dict]] = {}
         for variant_config in MAGIC_VARIANTS:
-            variant = magic_manifest_variant(manifest, str(variant_config["key"]))
+            variant_key = str(variant_config["key"])
+            if variant_key not in (manifest.get("variants") or {}):
+                continue
+            variant = magic_manifest_variant(manifest, variant_key)
             source_dir = resolve_magic_variant_dir(manifest, variant)
-            entries: dict[int, dict] = {}
             for entry in variant.get("frames") or []:
                 source_index = safe_int(entry.get("source_index"), -1)
                 source_path = source_dir / str(entry.get("name") or "")
-                if source_index >= 0 and source_path.exists():
-                    entries[source_index] = {
-                        "entry": entry,
-                        "path": source_path,
-                    }
-            variant_sources[str(variant_config["key"])] = entries
-
-        primary_entries = variant_sources.get(str(MAGIC_VARIANTS[0]["key"]), {})
-        for source_index in primary_entries:
-            if source_index in cache:
-                continue
-            cached_variants = {}
-            for variant_config in MAGIC_VARIANTS:
-                variant_key = str(variant_config["key"])
-                cached = variant_sources.get(variant_key, {}).get(source_index)
-                if not cached:
-                    break
-                cached_variants[variant_key] = cached
-            else:
-                if source_alpha_by_index.get(source_index) and any(
-                    not image_path_has_visible_alpha(cached["path"])
-                    for cached in cached_variants.values()
-                ):
+                if source_index < 0 or not source_path.exists():
                     continue
-                cache[source_index] = cached_variants
+                if source_alpha_by_index.get(source_index) and not image_path_has_visible_alpha(source_path):
+                    continue
+                cache.setdefault(source_index, {}).setdefault(
+                    variant_key,
+                    {"entry": entry, "path": source_path},
+                )
     return cache
 
 
@@ -3919,10 +4901,20 @@ def magic_preview_job(
     selected_indices: list[int],
     resize_mode: str = MAGIC_RESIZE_MODE_DEFAULT,
     use_realesrgan: bool = True,
+    variant_keys: list[str] | None = None,
 ) -> dict:
     resize_mode = normalize_magic_resize_mode(resize_mode)
     resize_mode_label = str(MAGIC_RESIZE_MODES[resize_mode]["label"])
     use_realesrgan = bool(use_realesrgan)
+    requested_variant_keys = normalize_magic_variant_keys(variant_keys)
+    if "full" in requested_variant_keys and not use_realesrgan:
+        if variant_keys is None:
+            requested_variant_keys = [key for key in requested_variant_keys if key != "full"]
+        else:
+            raise ValueError("100% scale-processing variant requires Real-ESRGAN")
+    variant_configs = [
+        variant for variant in MAGIC_VARIANTS if str(variant["key"]) in requested_variant_keys
+    ]
     model_name = REAL_ESRGAN_ANIME_MODEL if use_realesrgan else "none"
     manifest = load_job_manifest(job_id)
     processed_dir = job_dir(job_id) / "processed"
@@ -3934,7 +4926,7 @@ def magic_preview_job(
             indices.append(index)
             seen_indices.add(index)
     if not indices:
-        raise ValueError("no frames selected for MAGIC")
+        raise ValueError("no frames selected for scale processing")
 
     if use_realesrgan:
         binary = resolve_realesrgan_binary()
@@ -3946,7 +4938,7 @@ def magic_preview_job(
     ai_input_dir = root / "ai-input"
     ai_output_dir = root / "ai-output"
     variants: dict[str, dict] = {}
-    for variant in MAGIC_VARIANTS:
+    for variant in variant_configs:
         frames_dir = root / str(variant["dir"])
         variants[str(variant["key"])] = {
             "key": str(variant["key"]),
@@ -3966,6 +4958,10 @@ def magic_preview_job(
     cached_magic = find_cached_magic_frames(job_id, resize_mode, use_realesrgan)
     generated_count = 0
     reused_count = 0
+    generated_variant_count = 0
+    reused_variant_count = 0
+    esr_generated_count = 0
+    esr_reused_count = 0
     for output_index, frame_index in enumerate(indices, start=1):
         entry = frame_map[frame_index]
         source_path = processed_dir / entry["name"]
@@ -3973,15 +4969,16 @@ def magic_preview_job(
         ai_input_path = ai_input_dir / frame_name
         ai_output_path = ai_output_dir / frame_name
 
-        cached_variants = cached_magic.get(frame_index)
-        if cached_variants:
-            for variant in variants.values():
-                variant_key = str(variant["key"])
-                cached = cached_variants[variant_key]
+        cached_variants = cached_magic.get(frame_index, {})
+        missing_variant_keys: list[str] = []
+        for variant in variants.values():
+            variant_key = str(variant["key"])
+            cached = cached_variants.get(variant_key)
+            if cached:
                 cached_entry = cached["entry"]
                 frames_dir = Path(variant["frames_dir"])
                 processed_path = frames_dir / frame_name
-                shutil.copy2(cached["path"], processed_path)
+                link_or_copy_file(cached["path"], processed_path)
                 processed_bytes = processed_path.stat().st_size
                 frame_width = safe_int(cached_entry.get("width"), 0)
                 frame_height = safe_int(cached_entry.get("height"), 0)
@@ -4005,19 +5002,36 @@ def magic_preview_job(
                         "cached": True,
                     }
                 )
+                reused_variant_count += 1
+            else:
+                missing_variant_keys.append(variant_key)
+
+        if not missing_variant_keys:
             reused_count += 1
             continue
 
         with Image.open(source_path) as image:
             source_rgba = image.convert("RGBA")
         if use_realesrgan:
-            upscaled_frame, source_size = build_magic_upscaled_frame(source_rgba, ai_input_path, ai_output_path)
+            source_size = source_rgba.size
+            upscaled_frame = load_magic_esr_cache(job_id, frame_index, source_size)
+            if upscaled_frame is None:
+                try:
+                    upscaled_frame, source_size = build_magic_upscaled_frame(source_rgba, ai_input_path, ai_output_path)
+                    save_magic_esr_cache(job_id, frame_index, upscaled_frame)
+                    esr_generated_count += 1
+                finally:
+                    ai_input_path.unlink(missing_ok=True)
+                    ai_output_path.unlink(missing_ok=True)
+            else:
+                esr_reused_count += 1
         else:
             source_size = source_rgba.size
             upscaled_frame = source_rgba.copy()
         generated_count += 1
 
-        for variant in variants.values():
+        for variant_key in missing_variant_keys:
+            variant = variants[variant_key]
             frames_dir = Path(variant["frames_dir"])
             processed_path = frames_dir / frame_name
             magic_frame = resize_magic_frame(
@@ -4046,11 +5060,15 @@ def magic_preview_job(
                 }
             )
             magic_frame.close()
+            generated_variant_count += 1
 
         source_rgba.close()
         upscaled_frame.close()
 
-    primary = variants["half"]
+    primary_key = "half" if "half" in variants else requested_variant_keys[0]
+    primary = variants[primary_key]
+    shutil.rmtree(ai_input_dir, ignore_errors=True)
+    shutil.rmtree(ai_output_dir, ignore_errors=True)
 
     result = {
         "magic_id": magic_id,
@@ -4058,7 +5076,7 @@ def magic_preview_job(
         "model": model_name,
         "use_realesrgan": use_realesrgan,
         "upscale": MAGIC_UPSCALE if use_realesrgan else 1,
-        "final_scale": 0.5,
+        "final_scale": float(primary["scale"]),
         "resize_mode": resize_mode,
         "resize_mode_label": resize_mode_label,
         "output_dir": str(root),
@@ -4069,8 +5087,13 @@ def magic_preview_job(
         "bytes": int(primary["bytes"]),
         "frames": primary["frames"],
         "variants": variants,
+        "variant_keys": requested_variant_keys,
         "generated_count": generated_count,
         "reused_count": reused_count,
+        "generated_variant_count": generated_variant_count,
+        "reused_variant_count": reused_variant_count,
+        "esr_generated_count": esr_generated_count,
+        "esr_reused_count": esr_reused_count,
         "created_at": iso_now(),
     }
     (root / "manifest.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -4080,10 +5103,10 @@ def magic_preview_job(
 def load_magic_manifest(magic_id: str) -> dict:
     magic_id = str(magic_id or "").strip()
     if not magic_id or Path(magic_id).name != magic_id:
-        raise ValueError("invalid MAGIC id")
+        raise ValueError("invalid scale-processing id")
     path = MAGIC_DIR / f"{magic_id}-magic" / "manifest.json"
     if not path.exists():
-        raise FileNotFoundError(f"MAGIC result not found: {magic_id}")
+        raise FileNotFoundError(f"scale-processing result not found: {magic_id}")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -4107,111 +5130,40 @@ def export_magic_frames(
     magic_id: str,
     variant_key: str = "half",
     video_duration_ms: int = 100,
+    export_format: str = "frames",
 ) -> dict:
+    export_format = normalize_export_format(export_format)
     manifest = load_magic_manifest(magic_id)
-    job_manifest = load_job_manifest(str(manifest.get("job_id") or ""))
-    job_frame_sizes = {
-        entry["index"]: (
-            safe_int(entry.get("width"), 0),
-            safe_int(entry.get("height"), 0),
-        )
-        for entry in job_manifest.get("frames") or []
-    }
+    manifest_variants = manifest.get("variants") or {}
+    if variant_key != "half" and variant_key not in manifest_variants:
+        raise ValueError(f"scale variant not found: {variant_key}")
     variant = magic_manifest_variant(manifest, variant_key)
     source_dir = resolve_magic_variant_dir(manifest, variant)
     if not source_dir.exists():
-        raise FileNotFoundError(f"MAGIC frames not found: {manifest['magic_id']}")
+        raise FileNotFoundError(f"scale-processed frames not found: {manifest['magic_id']}")
 
     variant_key = str(variant.get("key") or "half")
-    target_dir = configured_exports_dir() / f"{timestamped_id()}-magic-{variant_key}-frames"
-    frames_dir = target_dir / "frames"
-    sheet_dir = target_dir / "sprite-sheet"
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    sheet_dir.mkdir(parents=True, exist_ok=True)
-
-    copied_count = 0
-    copied_paths: list[Path] = []
-    mov_frame_sizes: list[tuple[int, int]] = []
-    for output_index, entry in enumerate(variant.get("frames") or [], start=1):
+    target_dir = configured_exports_dir() / f"{timestamped_id()}-scale-{variant_key}-{export_format}"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    source_paths: list[Path] = []
+    source_indices: list[int] = []
+    for entry in variant.get("frames") or []:
         source_path = source_dir / str(entry.get("name") or "")
         if not source_path.exists():
             continue
-        target_path = frames_dir / f"frame_{output_index:03d}.png"
-        shutil.copy2(source_path, target_path)
-        copied_count += 1
-        copied_paths.append(target_path)
-        source_size = job_frame_sizes.get(safe_int(entry.get("source_index"), -1))
-        if not source_size or source_size[0] <= 0 or source_size[1] <= 0:
-            source_size = (
-                max(1, round(safe_int(entry.get("width"), 1) / max(float(variant.get("scale") or 1), 0.0001))),
-                max(1, round(safe_int(entry.get("height"), 1) / max(float(variant.get("scale") or 1), 0.0001))),
-            )
-        mov_frame_sizes.append(source_size)
+        source_index = safe_int(entry.get("source_index"), -1)
+        source_paths.append(source_path)
+        source_indices.append(source_index)
 
-    if copied_count <= 0:
-        raise ValueError("no MAGIC frames exported")
-
-    cell_width = 0
-    cell_height = 0
-    frame_sizes: list[tuple[int, int]] = []
-    for frame_path in copied_paths:
-        frame = open_rgba_image(frame_path)
-        frame_sizes.append(frame.size)
-        cell_width = max(cell_width, frame.size[0])
-        cell_height = max(cell_height, frame.size[1])
-        frame.close()
+    if not source_paths:
+        raise ValueError("no scale-processed frames exported")
 
     video_duration_ms = clamp_int(video_duration_ms, 20, 5000)
-    timestamp = f"{datetime.now():%Y%m%d-%H%M%S}"
-    mov_name = f"magic-{variant_key}-{timestamp}.mov"
-    gif_name = f"magic-{variant_key}-{timestamp}.gif"
-    sheet_name = "sheet.png"
-    sheet_json_name = "sheet.json"
-    mov_cell_width = max(width for width, _height in mov_frame_sizes)
-    mov_cell_height = max(height for _width, height in mov_frame_sizes)
-    save_alpha_mov(
-        copied_paths,
-        frame_sizes,
-        target_dir / mov_name,
-        mov_cell_width,
-        mov_cell_height,
-        video_duration_ms,
-        render_sizes=mov_frame_sizes,
-    )
-    save_gif(copied_paths, frame_sizes, target_dir / gif_name, cell_width, cell_height, video_duration_ms)
-    sheet_metadata = save_sprite_sheet(
-        copied_paths,
-        frame_sizes,
-        sheet_dir / sheet_name,
-        sheet_dir / sheet_json_name,
-        cell_width,
-        cell_height,
-        video_duration_ms,
-    )
-
     result = {
+        "export_format": export_format,
         "output_dir": str(target_dir),
-        "frames_dir": str(frames_dir),
-        "sheet_dir": str(sheet_dir),
-        "video_name": mov_name,
-        "video_url": export_url(target_dir, mov_name),
-        "mov_name": mov_name,
-        "mov_url": export_url(target_dir, mov_name),
-        "gif_name": gif_name,
-        "gif_url": export_url(target_dir, gif_name),
-        "sheet_name": sheet_name,
-        "sheet_url": export_url(target_dir, f"sprite-sheet/{sheet_name}"),
-        "sheet_json_name": sheet_json_name,
-        "sheet_json_url": export_url(target_dir, f"sprite-sheet/{sheet_json_name}"),
-        "sheet_columns": sheet_metadata["columns"],
-        "sheet_rows": sheet_metadata["rows"],
-        "sheet_width": sheet_metadata["width"],
-        "sheet_height": sheet_metadata["height"],
-        "frame_count": copied_count,
-        "max_width": mov_cell_width,
-        "max_height": mov_cell_height,
-        "gif_width": variant.get("max_width") or 0,
-        "gif_height": variant.get("max_height") or 0,
+        "frame_count": len(source_paths),
+        "frame_duration_ms": video_duration_ms,
         "video_duration_ms": video_duration_ms,
         "source_magic_id": manifest.get("magic_id") or magic_id,
         "variant_key": variant_key,
@@ -4225,18 +5177,109 @@ def export_magic_frames(
         "resize_mode_label": manifest.get("resize_mode_label") or MAGIC_RESIZE_MODES[MAGIC_RESIZE_MODE_DEFAULT]["label"],
         "created_at": iso_now(),
     }
+
+    if export_format == "frames":
+        frames_dir = target_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        frame_metadata = []
+        for output_index, (source_index, source_path) in enumerate(zip(source_indices, source_paths), start=1):
+            target_path = frames_dir / f"frame_{output_index:03d}.png"
+            shutil.copy2(source_path, target_path)
+            frame_metadata.append(
+                {
+                    "index": output_index - 1,
+                    "source_index": source_index,
+                    "file": target_path.name,
+                    "duration_ms": video_duration_ms,
+                }
+            )
+        frames_json_name = "frames.json"
+        (frames_dir / frames_json_name).write_text(
+            json.dumps(
+                {
+                    "format": "frame-sequence",
+                    "frame_count": len(frame_metadata),
+                    "frame_duration_ms": video_duration_ms,
+                    "total_duration_ms": len(frame_metadata) * video_duration_ms,
+                    "frames": frame_metadata,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        result.update({"frames_dir": str(frames_dir), "frames_json_name": frames_json_name})
+        (target_dir / "export.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return result
+
+    cell_width = 0
+    cell_height = 0
+    frame_sizes: list[tuple[int, int]] = []
+    for frame_path in source_paths:
+        frame = open_rgba_image(frame_path)
+        frame_sizes.append(frame.size)
+        cell_width = max(cell_width, frame.size[0])
+        cell_height = max(cell_height, frame.size[1])
+        frame.close()
+
+    timestamp = f"{datetime.now():%Y%m%d-%H%M%S}"
+    if export_format == "mov":
+        mov_name = f"scale-{variant_key}-{timestamp}.mov"
+        save_alpha_mov(
+            source_paths,
+            frame_sizes,
+            target_dir / mov_name,
+            cell_width,
+            cell_height,
+            video_duration_ms,
+        )
+        result.update({"mov_name": mov_name, "mov_url": export_url(target_dir, mov_name)})
+    elif export_format == "gif":
+        gif_name = f"scale-{variant_key}-{timestamp}.gif"
+        save_gif(source_paths, frame_sizes, target_dir / gif_name, cell_width, cell_height, video_duration_ms)
+        result.update({"gif_name": gif_name, "gif_url": export_url(target_dir, gif_name)})
+    else:
+        sheet_dir = target_dir / "sprite-sheet"
+        sheet_dir.mkdir(parents=True, exist_ok=True)
+        sheet_name = "sheet.png"
+        sheet_json_name = "sheet.json"
+        sheet_metadata = save_sprite_sheet(
+            source_paths,
+            frame_sizes,
+            sheet_dir / sheet_name,
+            sheet_dir / sheet_json_name,
+            cell_width,
+            cell_height,
+            video_duration_ms,
+        )
+        result.update(
+            {
+                "sheet_dir": str(sheet_dir),
+                "sheet_name": sheet_name,
+                "sheet_url": export_url(target_dir, f"sprite-sheet/{sheet_name}"),
+                "sheet_json_name": sheet_json_name,
+                "sheet_json_url": export_url(target_dir, f"sprite-sheet/{sheet_json_name}"),
+                "sheet_columns": sheet_metadata["columns"],
+                "sheet_rows": sheet_metadata["rows"],
+                "sheet_width": sheet_metadata["width"],
+                "sheet_height": sheet_metadata["height"],
+            }
+        )
     (target_dir / "export.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 
 
-def export_job(job_id: str, selected_indices: list[int], video_duration_ms: int) -> dict:
+def normalize_export_format(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in {"frames", "sprite_sheet", "mov", "gif"}:
+        raise ValueError(f"unsupported export format: {value}")
+    return normalized
+
+
+def export_job(job_id: str, selected_indices: list[int], video_duration_ms: int, export_format: str) -> dict:
+    export_format = normalize_export_format(export_format)
     manifest = load_job_manifest(job_id)
     processed_dir = job_dir(job_id) / "processed"
-    target_dir = configured_exports_dir() / f"{timestamped_id()}-export"
-    frames_dir = target_dir / "frames"
-    sheet_dir = target_dir / "sprite-sheet"
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    sheet_dir.mkdir(parents=True, exist_ok=True)
 
     frame_map = {entry["index"]: entry for entry in manifest["frames"]}
     seen_indices: set[int] = set()
@@ -4248,34 +5291,99 @@ def export_job(job_id: str, selected_indices: list[int], video_duration_ms: int)
     if not indices:
         raise ValueError("no frames selected for export")
 
-    copied_paths: list[Path] = []
-    for output_index, frame_index in enumerate(indices, start=1):
-        entry = frame_map[frame_index]
-        source_path = processed_dir / entry["name"]
-        target_path = frames_dir / f"frame_{output_index:03d}.png"
-        shutil.copy2(source_path, target_path)
-        copied_paths.append(target_path)
+    video_duration_ms = clamp_int(video_duration_ms, 20, 5000)
+    target_dir = configured_exports_dir() / f"{timestamped_id()}-export"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    selected_entries = [frame_map[index] for index in indices]
+    source_paths = [processed_dir / entry["name"] for entry in selected_entries]
+    result = {
+        "export_format": export_format,
+        "output_dir": str(target_dir),
+        "frame_count": len(source_paths),
+        "frame_duration_ms": video_duration_ms,
+        "video_duration_ms": video_duration_ms,
+    }
+
+    if export_format == "frames":
+        frames_dir = target_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        frame_metadata = []
+        for output_index, (frame_index, source_path) in enumerate(
+            zip(indices, source_paths),
+            start=1,
+        ):
+            target_path = frames_dir / f"frame_{output_index:03d}.png"
+            shutil.copy2(source_path, target_path)
+            frame_metadata.append(
+                {
+                    "index": output_index - 1,
+                    "source_index": frame_index,
+                    "file": target_path.name,
+                    "duration_ms": video_duration_ms,
+                }
+            )
+        frames_json_name = "frames.json"
+        frames_metadata = {
+            "format": "frame-sequence",
+            "frame_count": len(frame_metadata),
+            "frame_duration_ms": video_duration_ms,
+            "total_duration_ms": len(frame_metadata) * video_duration_ms,
+            "frames": frame_metadata,
+        }
+        (frames_dir / frames_json_name).write_text(
+            json.dumps(frames_metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        result.update(
+            {
+                "frames_dir": str(frames_dir),
+                "frames_json_name": frames_json_name,
+                "frames_json_url": export_url(target_dir, f"frames/{frames_json_name}"),
+            }
+        )
+        return result
 
     cell_width = 0
     cell_height = 0
     frame_sizes: list[tuple[int, int]] = []
-    for frame_path in copied_paths:
+    for frame_path in source_paths:
         frame = open_rgba_image(frame_path)
         frame_sizes.append(frame.size)
         cell_width = max(cell_width, frame.size[0])
         cell_height = max(cell_height, frame.size[1])
         frame.close()
 
-    video_duration_ms = clamp_int(video_duration_ms, 20, 5000)
     timestamp = f"{datetime.now():%Y%m%d-%H%M%S}"
-    mov_name = f"animation-{timestamp}.mov"
-    gif_name = f"animation-{timestamp}.gif"
+    if export_format == "mov":
+        mov_name = f"animation-{timestamp}.mov"
+        save_alpha_mov(source_paths, frame_sizes, target_dir / mov_name, cell_width, cell_height, video_duration_ms)
+        result.update(
+            {
+                "video_name": mov_name,
+                "video_url": export_url(target_dir, mov_name),
+                "mov_name": mov_name,
+                "mov_url": export_url(target_dir, mov_name),
+            }
+        )
+        return result
+
+    if export_format == "gif":
+        gif_name = f"animation-{timestamp}.gif"
+        save_gif(source_paths, frame_sizes, target_dir / gif_name, cell_width, cell_height, video_duration_ms)
+        result.update(
+            {
+                "gif_name": gif_name,
+                "gif_url": export_url(target_dir, gif_name),
+            }
+        )
+        return result
+
+    sheet_dir = target_dir / "sprite-sheet"
+    sheet_dir.mkdir(parents=True, exist_ok=True)
     sheet_name = "sheet.png"
     sheet_json_name = "sheet.json"
-    save_alpha_mov(copied_paths, frame_sizes, target_dir / mov_name, cell_width, cell_height, video_duration_ms)
-    save_gif(copied_paths, frame_sizes, target_dir / gif_name, cell_width, cell_height, video_duration_ms)
     sheet_metadata = save_sprite_sheet(
-        copied_paths,
+        source_paths,
         frame_sizes,
         sheet_dir / sheet_name,
         sheet_dir / sheet_json_name,
@@ -4283,28 +5391,20 @@ def export_job(job_id: str, selected_indices: list[int], video_duration_ms: int)
         cell_height,
         video_duration_ms,
     )
-
-    return {
-        "output_dir": str(target_dir),
-        "frames_dir": str(frames_dir),
-        "sheet_dir": str(sheet_dir),
-        "video_name": mov_name,
-        "video_url": export_url(target_dir, mov_name),
-        "mov_name": mov_name,
-        "mov_url": export_url(target_dir, mov_name),
-        "gif_name": gif_name,
-        "gif_url": export_url(target_dir, gif_name),
-        "sheet_name": sheet_name,
-        "sheet_url": export_url(target_dir, f"sprite-sheet/{sheet_name}"),
-        "sheet_json_name": sheet_json_name,
-        "sheet_json_url": export_url(target_dir, f"sprite-sheet/{sheet_json_name}"),
-        "sheet_columns": sheet_metadata["columns"],
-        "sheet_rows": sheet_metadata["rows"],
-        "sheet_width": sheet_metadata["width"],
-        "sheet_height": sheet_metadata["height"],
-        "frame_count": len(copied_paths),
-        "video_duration_ms": video_duration_ms,
-    }
+    result.update(
+        {
+            "sheet_dir": str(sheet_dir),
+            "sheet_name": sheet_name,
+            "sheet_url": export_url(target_dir, f"sprite-sheet/{sheet_name}"),
+            "sheet_json_name": sheet_json_name,
+            "sheet_json_url": export_url(target_dir, f"sprite-sheet/{sheet_json_name}"),
+            "sheet_columns": sheet_metadata["columns"],
+            "sheet_rows": sheet_metadata["rows"],
+            "sheet_width": sheet_metadata["width"],
+            "sheet_height": sheet_metadata["height"],
+        }
+    )
+    return result
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -4365,6 +5465,41 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         try:
+            if parsed.path == "/api/ai-model-status":
+                payload = self.read_json_body()
+                status = ai_model_install_status(
+                    str(payload.get("matte_mode") or ""),
+                    str(payload.get("ai_model") or DEFAULT_AI_MATTE_MODEL),
+                    str(payload.get("corridorkey_coarse_mask") or "chroma"),
+                    str(payload.get("corridorkey_screen") or "green"),
+                )
+                self.send_json({"ok": True, "status": status})
+                return
+            if parsed.path == "/api/install-ai-model":
+                payload = self.read_json_body()
+                result = install_ai_models_for_matte_mode(
+                    confirmed=payload.get("confirmed") is True,
+                    matte_mode=str(payload.get("matte_mode") or ""),
+                    model_key=str(payload.get("ai_model") or DEFAULT_AI_MATTE_MODEL),
+                    corridorkey_coarse_mask=str(payload.get("corridorkey_coarse_mask") or "chroma"),
+                    corridorkey_screen=str(payload.get("corridorkey_screen") or "green"),
+                )
+                self.send_json({"ok": True, "result": result})
+                return
+            if parsed.path == "/api/realesrgan-status":
+                self.read_json_body()
+                self.send_json({"ok": True, "status": realesrgan_install_status()})
+                return
+            if parsed.path == "/api/install-realesrgan":
+                payload = self.read_json_body()
+                result = install_realesrgan_runtime(payload.get("confirmed") is True)
+                self.send_json({"ok": True, "result": result})
+                return
+            if parsed.path == "/api/clear-runtime-files":
+                payload = self.read_json_body()
+                result = clear_managed_runtime_files(payload.get("confirmed") is True)
+                self.send_json({"ok": True, "result": result})
+                return
             if parsed.path == "/api/import-path":
                 payload = self.read_json_body()
                 raw_path = str(payload.get("path") or "").strip().strip("\"'")
@@ -4451,10 +5586,21 @@ class AppHandler(BaseHTTPRequestHandler):
                     luma_polarity=normalize_luma_polarity(str(payload.get("luma_polarity") or "auto")),
                     corridorkey_enabled=bool(payload.get("corridorkey_enabled", False)),
                     corridorkey_screen=normalize_corridorkey_screen(str(payload.get("corridorkey_screen") or "auto")),
-                    batch_green_to_black=bool(payload.get("batch_green_to_black", False)),
-                    batch_green_desaturate=bool(payload.get("batch_green_desaturate", False)),
+                    corridorkey_coarse_mask=normalize_corridorkey_coarse_mask(
+                        str(payload.get("corridorkey_coarse_mask") or "chroma")
+                    ),
+                    preprocess_esr_smoothing=bool(payload.get("preprocess_esr_smoothing", False)),
+                    watermark_removal=bool(payload.get("watermark_removal", False)),
+                    batch_background_to_black=bool(
+                        payload.get("batch_background_to_black", payload.get("batch_green_to_black", False))
+                    ),
+                    batch_background_desaturate=bool(
+                        payload.get("batch_background_desaturate", payload.get("batch_green_desaturate", False))
+                    ),
                     batch_semitransparent_to_black=bool(payload.get("batch_semitransparent_to_black", False)),
                     batch_semitransparent_to_opaque=bool(payload.get("batch_semitransparent_to_opaque", False)),
+                    manual_key_colors=payload.get("manual_key_colors"),
+                    corridorkey_options=corridorkey_options_from_payload(payload),
                     production_context={
                         key: str(payload.get(key)).strip()
                         for key in ("production_id", "scene_id", "shot_id", "shot_version_id")
@@ -4491,10 +5637,21 @@ class AppHandler(BaseHTTPRequestHandler):
                     luma_polarity=normalize_luma_polarity(str(payload.get("luma_polarity") or "auto")),
                     corridorkey_enabled=bool(payload.get("corridorkey_enabled", False)),
                     corridorkey_screen=normalize_corridorkey_screen(str(payload.get("corridorkey_screen") or "auto")),
-                    batch_green_to_black=bool(payload.get("batch_green_to_black", False)),
-                    batch_green_desaturate=bool(payload.get("batch_green_desaturate", False)),
+                    corridorkey_coarse_mask=normalize_corridorkey_coarse_mask(
+                        str(payload.get("corridorkey_coarse_mask") or "chroma")
+                    ),
+                    preprocess_esr_smoothing=bool(payload.get("preprocess_esr_smoothing", False)),
+                    watermark_removal=bool(payload.get("watermark_removal", False)),
+                    batch_background_to_black=bool(
+                        payload.get("batch_background_to_black", payload.get("batch_green_to_black", False))
+                    ),
+                    batch_background_desaturate=bool(
+                        payload.get("batch_background_desaturate", payload.get("batch_green_desaturate", False))
+                    ),
                     batch_semitransparent_to_black=bool(payload.get("batch_semitransparent_to_black", False)),
                     batch_semitransparent_to_opaque=bool(payload.get("batch_semitransparent_to_opaque", False)),
+                    manual_key_colors=payload.get("manual_key_colors"),
+                    corridorkey_options=corridorkey_options_from_payload(payload),
                 )
                 self.send_json({"ok": True, "preview": result})
                 return
@@ -4503,18 +5660,18 @@ class AppHandler(BaseHTTPRequestHandler):
                 result = save_preview_as_job(str(payload.get("preview_id") or ""))
                 self.send_json({"ok": True, "job": result})
                 return
-            if parsed.path == "/api/preview-green-to-black":
+            if parsed.path in {"/api/preview-background-to-black", "/api/preview-green-to-black"}:
                 payload = self.read_json_body()
-                result = green_to_black_preview(
+                result = background_to_black_preview(
                     str(payload.get("preview_id") or ""),
                     threshold=max(0, min(255, safe_int(payload.get("threshold"), 42))),
                     dominance=max(0, min(255, safe_int(payload.get("dominance"), 24))),
                 )
                 self.send_json({"ok": True, "preview": result})
                 return
-            if parsed.path == "/api/preview-green-desaturate":
+            if parsed.path in {"/api/preview-background-desaturate", "/api/preview-green-desaturate"}:
                 payload = self.read_json_body()
-                result = green_desaturate_preview(
+                result = background_desaturate_preview(
                     str(payload.get("preview_id") or ""),
                     threshold=max(0, min(255, safe_int(payload.get("threshold"), 42))),
                     dominance=max(0, min(255, safe_int(payload.get("dominance"), 24))),
@@ -4545,12 +5702,13 @@ class AppHandler(BaseHTTPRequestHandler):
                     job_id=str(payload.get("job_id") or ""),
                     selected_indices=[safe_int(value, -1) for value in (payload.get("selected_indices") or [])],
                     video_duration_ms=safe_int(payload.get("video_duration_ms"), 100),
+                    export_format=str(payload.get("export_format") or ""),
                 )
                 self.send_json({"ok": True, "export": result})
                 return
             if parsed.path == "/api/magic-preview":
                 if not MAGIC_PREVIEW_LOCK.acquire(blocking=False):
-                    self.send_error_json("MAGIC 正在处理，请等当前任务结束后再点。", HTTPStatus.CONFLICT)
+                    self.send_error_json("缩放处理正在进行，请等当前任务结束后再点。", HTTPStatus.CONFLICT)
                     return
                 payload = self.read_json_body()
                 try:
@@ -4559,6 +5717,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         selected_indices=[safe_int(value, -1) for value in (payload.get("selected_indices") or [])],
                         resize_mode=str(payload.get("resize_mode") or MAGIC_RESIZE_MODE_DEFAULT),
                         use_realesrgan=safe_bool(payload.get("use_realesrgan"), True),
+                        variant_keys=[str(value) for value in (payload.get("variant_keys") or [])],
                     )
                     self.send_json({"ok": True, "magic": result})
                 finally:
@@ -4570,6 +5729,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     str(payload.get("magic_id") or ""),
                     variant_key=str(payload.get("variant_key") or "half"),
                     video_duration_ms=safe_int(payload.get("video_duration_ms"), 100),
+                    export_format=str(payload.get("export_format") or "frames"),
                 )
                 self.send_json({"ok": True, "export": result})
                 return

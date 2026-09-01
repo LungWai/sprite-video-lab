@@ -15,6 +15,17 @@
           <p class="eyebrow">Sprite Video Lab</p>
           <h1>Sprite 资产处理台</h1>
         </div>
+        <button
+          id="clearRuntimeFilesButton"
+          class="clear-runtime-button"
+          type="button"
+          title="清空 WebApp 产生的内部文件"
+          aria-label="清空 WebApp 产生的内部文件"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5m4-5v5" />
+          </svg>
+        </button>
       </div>
       <div class="source-strip" aria-label="当前素材状态">
         <div>
@@ -112,9 +123,14 @@
           </div>
 
           <div class="preview-layout">
-            <div class="video-wrap">
+            <div id="videoWrap" class="video-wrap">
               <video id="videoPreview" playsinline muted></video>
               <img id="mediaPreviewImage" alt="源图预览" hidden>
+              <div id="keySampleMarkers" class="key-sample-markers" aria-hidden="true"></div>
+              <div id="keySamplingOverlay" class="key-sampling-overlay" hidden>
+                <span>取色中</span>
+                <strong>点击画面添加背景色</strong>
+              </div>
             </div>
 
             <div class="segment-panel">
@@ -171,7 +187,7 @@
           <div class="section-head">
             <div>
               <p class="section-kicker">Matte</p>
-              <h2>去背景与输出设置</h2>
+              <h2>去背景与取样设置</h2>
             </div>
             <div class="step-lock-note" id="processLockNote">导入素材后即可预览当前帧并开始处理。</div>
           </div>
@@ -179,71 +195,63 @@
           <div class="process-step-shell" id="processStepShell">
             <div class="parameter-layout">
               <div class="parameter-column">
-                <div class="control-group">
-                  <div class="group-title">
-                    <span>基础输出</span>
-                  </div>
-                  <div class="form-grid">
-                    <label class="field">
-                      <span>保留每 N 帧</span>
-                      <input id="keepEveryInput" type="number" min="1" step="1" value="2">
-                      <small>1 为全保留，2 为隔一帧。</small>
-                    </label>
-
-                    <label class="field">
-                      <span>输出尺寸</span>
-                      <input id="outputScaleInput" type="number" min="5" max="200" step="5" value="100" list="outputScalePresets">
-                      <datalist id="outputScalePresets">
-                        <option value="100"></option>
-                        <option value="75"></option>
-                        <option value="50"></option>
-                        <option value="25"></option>
-                      </datalist>
-                      <small>百分比，按源素材高度缩放。</small>
-                    </label>
-
-                    <label class="field">
-                      <span>画布布局</span>
-                      <select id="canvasModeInput">
-                        <option value="auto">自动宽度，居中</option>
-                        <option value="square_bottom">方形画布，底部对齐</option>
-                        <option value="square_center">方形画布，居中</option>
-                      </select>
-                    </label>
-
-                    <label class="field">
-                      <span>画布边距</span>
-                      <input id="reducePxInput" type="number" min="0" step="1" value="0">
-                    </label>
-                  </div>
-                </div>
-
                 <div class="control-group matte-algorithm-group">
                   <div class="group-title">
                     <span>去背景</span>
+                    <button id="quickReferenceToggle" class="quick-reference-toggle" type="button" aria-expanded="false" aria-controls="quickReferencePanel">速查表</button>
                   </div>
-                  <div class="form-grid">
-                    <label class="field checkbox-field">
-                      <span>启用抠背景</span>
-                      <label class="checkbox-row">
-                        <input id="chromaEnabledInput" type="checkbox" checked>
-                        <span>输出透明 PNG</span>
-                      </label>
-                    </label>
+                  <div id="quickReferencePanel" class="quick-reference-panel" hidden>
+                    <div class="quick-reference-intro">
+                      <strong>先看素材，再选处理方式</strong>
+                      <span>这里只放常用判断；模型和运行环境细节仍以 README 与 AI_MATTING.md 为准。</span>
+                    </div>
+                    <div class="quick-reference-grid">
+                      <section class="quick-reference-section">
+                        <h4>背景目标与后处理</h4>
+                        <dl class="quick-reference-list">
+                          <div><dt>自动取背景色</dt><dd>纯色背景优先使用，由画面边缘自动判断颜色。</dd></div>
+                          <div><dt>手动指定颜色</dt><dd>自动取色不准时，明确指定绿、蓝、白或其他底色。</dd></div>
+                          <div><dt>Luma 背景</dt><dd>亮特效配黑底选“抠除黑色”；暗素材配白底选“抠除白色”。</dd></div>
+                          <div><dt>背景残留转黑</dt><dd>适合需要黑色边缘的 VFX，不适合普通彩色角色。</dd></div>
+                          <div><dt>背景残留饱和度归零</dt><dd>降低背景色污染，通常比直接转黑更自然。</dd></div>
+                          <div><dt>半透明转黑 / 不透明</dt><dd>用于特殊硬边风格；会损失柔光和半透明细节。</dd></div>
+                        </dl>
+                      </section>
 
+                      <section class="quick-reference-section quick-reference-wide">
+                        <h4>处理方式</h4>
+                        <dl class="quick-reference-list quick-reference-modes">
+                          <div><dt>Chroma</dt><dd>绿幕、蓝幕、白底、灰底等受控纯色背景，速度最快。</dd></div>
+                          <div><dt>Luma</dt><dd>黑底或白底的火焰、闪电、粒子和亮部 VFX。</dd></div>
+                          <div><dt>BiRefNet</dt><dd>真实背景或 AI 生成背景，主体轮廓明确时使用。</dd></div>
+                          <div><dt>CorridorKey</dt><dd>标准绿幕或蓝幕，分别使用对应的 EZ-CorridorKey 模型重建前景、细化遮罩并去除幕布溢色。</dd></div>
+                          <div><dt>不抠图</dt><dd>保留原始画面，只执行后续尺寸与批处理。</dd></div>
+                        </dl>
+                      </section>
+
+                      <section class="quick-reference-section quick-reference-wide">
+                        <h4>导出与缩放处理</h4>
+                        <dl class="quick-reference-list quick-reference-exports">
+                          <div><dt>Frames</dt><dd>导出 PNG 序列和 frames.json；JSON 记录每帧时长。</dd></div>
+                          <div><dt>Spritesheet</dt><dd>导出固定网格图集和坐标、尺寸、时长 JSON。</dd></div>
+                          <div><dt>透明 MOV</dt><dd>适合需要 alpha 视频的合成或剪辑流程。</dd></div>
+                          <div><dt>GIF</dt><dd>适合快速预览，不保留完整半透明质量。</dd></div>
+                          <div><dt>硬缩放</dt><dd>nearest-neighbor 缩小，像素边缘更利落。</dd></div>
+                          <div><dt>软缩放</dt><dd>BOX 缩小，边缘更平滑，抗锯齿更明显。</dd></div>
+                        </dl>
+                      </section>
+                    </div>
+                  </div>
+                  <div class="form-grid single-control-grid">
                     <label class="field">
                       <span>处理方式</span>
                       <select id="matteModeInput">
-                        <option value="chroma" selected>chroma key</option>
-                        <option value="birefnet">只用 BiRefNet</option>
-                        <option value="corridorkey">只用 CorridorKey</option>
-                        <option value="luma">只用 Luma</option>
-                        <option value="birefnet_corridorkey">BiRefNet 粗蒙版 / CorridorKey 精修边缘</option>
-                        <option value="birefnet_corridorkey_key">BiRefNet 后再用 CorridorKey 收紧抠图</option>
-                        <option value="birefnet_luma">BiRefNet 保主体 / Luma 补亮部</option>
-                        <option value="birefnet_luma_key">BiRefNet 后再用 Luma 收紧抠图</option>
-                        <option value="birefnet_luma_corridorkey">BiRefNet + Luma 合并后 / CorridorKey 精修</option>
-                        <option value="none">不去背景</option>
+                        <option value="chroma" selected>Chroma</option>
+                        <option value="luma">Luma</option>
+                        <option value="birefnet">BiRefNet</option>
+                        <option value="corridorkey">CorridorKey</option>
+                        <option value="corridorkey_blue">CorridorKey（蓝幕）</option>
+                        <option value="none">不抠图</option>
                       </select>
                       <small>选处理方式即可，细节由程序自动处理。</small>
                     </label>
@@ -255,6 +263,15 @@
                     <span>背景目标</span>
                   </div>
                   <div class="form-grid">
+                    <label class="field corridor-seed-only">
+                      <span>粗遮罩来源</span>
+                      <select id="corridorCoarseMaskInput">
+                        <option value="chroma" selected>Chroma</option>
+                        <option value="birefnet">BiRefNet</option>
+                      </select>
+                      <small>选择 Chroma 时，直接继承 Chroma 中的取色方式、全部色样和容差，再交给 CorridorKey 重建边缘和去溢色。</small>
+                    </label>
+
                     <label class="field chroma-only">
                       <span>背景色</span>
                       <select id="keyModeInput">
@@ -263,13 +280,34 @@
                       </select>
                     </label>
 
-                    <label id="manualColorField" class="field manual-color-field">
-                      <span>指定颜色</span>
-                      <div class="color-field">
-                        <input id="manualKeyInput" type="color" value="#00ff00">
-                        <strong id="manualKeyLabel">#00FF00</strong>
+                    <div id="manualColorField" class="field manual-color-field">
+                      <div class="manual-color-title">
+                        <span>背景色样</span>
+                        <strong id="manualKeySampleCount">0 / 12</strong>
                       </div>
-                    </label>
+                      <div class="color-field">
+                        <input id="manualKeyInput" class="palette-color-input" type="color" value="#00ff00" tabindex="-1" aria-label="选择要添加的背景色">
+                        <strong id="manualKeyLabel" hidden>#00FF00</strong>
+                        <button id="addPaletteKeyColorButton" class="ghost-button compact-button" type="button">从色板添加</button>
+                        <button id="keySamplingToggleButton" class="ghost-button compact-button" type="button">从画面添加</button>
+                        <button id="clearExtraKeySamplesButton" class="text-button" type="button">清空色样</button>
+                      </div>
+                      <div id="manualKeySamples" class="manual-key-samples" aria-live="polite"></div>
+                      <small>色板只选择候选颜色，点击添加后才会生效；色样可全部删除。</small>
+                    </div>
+
+                    <div id="chromaToleranceField" class="field chroma-guide-only chroma-tolerance-field">
+                      <div class="tolerance-title">
+                        <span>容差</span>
+                        <strong id="thresholdValueLabel">80</strong>
+                      </div>
+                      <input id="thresholdInput" type="range" min="0" max="180" step="1" value="80" aria-label="Chroma 背景色容差">
+                      <div class="tolerance-scale" aria-hidden="true">
+                        <span>更精准</span>
+                        <span>抠除更宽</span>
+                      </div>
+                      <small>色差较小时用较低值；仍有背景残留时逐步调高。</small>
+                    </div>
 
                     <label class="field luma-matte-only">
                       <span>Luma 背景</span>
@@ -282,17 +320,97 @@
                   </div>
                 </div>
 
+                <details id="corridorKeySettings" class="control-group corridor-key-only corridor-settings-disclosure">
+                  <summary class="corridor-settings-summary">
+                    <span class="corridor-settings-heading">
+                      <strong>EZ CorridorKey</strong>
+                      <small>高级参数</small>
+                    </span>
+                    <span id="corridorSettingsSummaryValue" class="corridor-settings-summary-value"></span>
+                    <span class="corridor-settings-toggle-label" aria-hidden="true"></span>
+                  </summary>
+                  <div class="corridor-settings-body">
+                    <div class="form-grid corridor-settings-grid">
+                    <label class="field">
+                      <span>幕布颜色</span>
+                      <select id="corridorScreenInput">
+                        <option value="green" selected>绿色</option>
+                        <option value="blue">蓝色</option>
+                      </select>
+                    </label>
+
+                    <label class="field">
+                      <span>输入色彩空间</span>
+                      <select id="corridorColorSpaceInput">
+                        <option value="srgb" selected>sRGB</option>
+                        <option value="linear">Linear</option>
+                      </select>
+                    </label>
+
+                    <div class="field corridor-slider-field">
+                      <div class="tolerance-title">
+                        <span>边缘去溢色</span>
+                        <strong id="corridorDespillValueLabel">0.50</strong>
+                      </div>
+                      <input id="corridorDespillInput" type="range" min="0" max="1" step="0.05" value="0.5">
+                      <div class="tolerance-scale" aria-hidden="true">
+                        <span>保留边缘原色</span>
+                        <span>边缘去色更强</span>
+                      </div>
+                    </div>
+
+                    <div class="field corridor-slider-field">
+                      <div class="tolerance-title">
+                        <span>边缘细化</span>
+                        <strong id="corridorRefinerValueLabel">1.00</strong>
+                      </div>
+                      <input id="corridorRefinerInput" type="range" min="0" max="3" step="0.05" value="1">
+                      <div class="tolerance-scale" aria-hidden="true">
+                        <span>关闭细化</span>
+                        <span>细化更强</span>
+                      </div>
+                    </div>
+
+                    <div class="field corridor-option-field">
+                      <label class="checkbox-row corridor-option-toggle">
+                        <input id="corridorDespeckleEnabledInput" type="checkbox" checked>
+                        <span>去除散点</span>
+                      </label>
+                      <label class="compact-number-field" for="corridorDespeckleSizeInput">
+                        <span>保留面积达到</span>
+                        <input id="corridorDespeckleSizeInput" type="number" min="0" max="999999" step="1" value="400">
+                        <span>px</span>
+                      </label>
+                      <small>删除小于该面积的断开杂点；细发丝丢失时降低数值。</small>
+                    </div>
+
+                    <div class="field corridor-option-field">
+                      <label class="checkbox-row corridor-option-toggle">
+                        <input id="corridorGarbageEnabledInput" type="checkbox">
+                        <span>垃圾遮罩</span>
+                      </label>
+                      <label class="compact-number-field" for="corridorGarbagePixelsInput">
+                        <span>向外保留</span>
+                        <input id="corridorGarbagePixelsInput" type="number" min="1" max="500" step="1" value="20" disabled>
+                        <span>px</span>
+                      </label>
+                      <small>清除初始遮罩范围之外的背景脏点；默认关闭。</small>
+                    </div>
+                    </div>
+                    <div class="corridor-preview-actions">
+                      <span id="corridorPreviewState" class="corridor-preview-state" data-state="empty">尚未预览</span>
+                    </div>
+                  </div>
+                </details>
+
                 <div class="hidden-runtime-controls" hidden>
-                  <input id="thresholdInput" type="hidden" value="80">
                   <input id="softnessInput" type="hidden" value="16">
                   <input id="despillInput" type="hidden" value="0.6">
                   <input id="haloInput" type="hidden" value="1">
+                  <input id="birefnetEdgeShrinkInput" type="hidden" value="0">
+                  <span id="birefnetEdgeShrinkValueLabel"></span>
+                  <span id="birefnetPreviewState" data-state="empty"></span>
                   <input id="corridorEnabledInput" type="checkbox">
-                  <select id="corridorScreenInput" aria-label="幕布颜色">
-                    <option value="auto" selected>自动</option>
-                    <option value="green">绿色</option>
-                    <option value="blue">蓝色</option>
-                  </select>
                   <select id="aiModelInput" aria-label="AI 模型">
                     <option value="birefnet-hr-matting" selected>BiRefNet HR-matting</option>
                   </select>
@@ -308,18 +426,18 @@
                   <input id="lumaStrengthInput" type="hidden" value="1.7">
                 </div>
 
-                <div class="control-group">
+                <div class="control-group batch-postprocess-group">
                   <div class="group-title">
-                    <span>批处理后处理</span>
+                    <span>后处理</span>
                   </div>
-                  <div class="check-stack">
+                  <div class="check-stack compact-check-grid">
                     <label class="checkbox-row">
-                      <input id="batchGreenToBlackInput" type="checkbox">
-                      <span>绿色残边转黑</span>
+                      <input id="batchBackgroundToBlackInput" type="checkbox">
+                      <span>背景残留转黑</span>
                     </label>
                     <label class="checkbox-row">
-                      <input id="batchGreenDesaturateInput" type="checkbox">
-                      <span>绿色残边饱和度归零</span>
+                      <input id="batchBackgroundDesaturateInput" type="checkbox">
+                      <span>背景残留饱和度归零</span>
                     </label>
                     <label class="checkbox-row">
                       <input id="batchSemiTransparentToBlackInput" type="checkbox">
@@ -335,11 +453,34 @@
 
               <div class="preview-column">
                 <div class="preview-toolbar">
-                  <div>
+                  <div class="preview-toolbar-summary">
                     <strong id="processPreviewTimeLabel">取样时间 -</strong>
                     <span id="processPreviewKeyLabel">取样方式 - / 抠图 -</span>
                   </div>
-                  <button id="previewFrameButton" class="primary-button" type="button">预览当前帧</button>
+                  <div class="preview-toolbar-actions">
+                    <label class="sampling-step-control">
+                      <span>每</span>
+                      <input id="keepEveryInput" type="number" min="1" step="1" value="2" aria-label="每 N 帧保留一帧">
+                      <span>帧保留一帧</span>
+                    </label>
+                    <label class="preprocess-smoothing-option">
+                      <input id="preprocessEsrSmoothingInput" type="checkbox">
+                      <span>
+                        <strong>先做平滑处理</strong>
+                        <small>ESR x4 → 原尺寸 → 抠图</small>
+                      </span>
+                    </label>
+                    <label id="aiLivePreviewOption" class="ai-live-preview-option" hidden>
+                      <input id="aiLivePreviewInput" type="checkbox">
+                      <span>即时预览</span>
+                    </label>
+                    <label class="ai-live-preview-option">
+                      <input id="watermarkRemovalInput" type="checkbox">
+                      <span>去水印</span>
+                    </label>
+                    <button id="previewFrameButton" class="primary-button" type="button">预览当前帧</button>
+                    <button id="processButton" class="primary-button large" type="button">开始处理区间</button>
+                  </div>
                 </div>
 
                 <div class="compare-grid">
@@ -381,29 +522,22 @@
                 </div>
 
                 <div class="preview-options">
-                  <label class="field">
-                    <span>结果背景</span>
-                    <select id="processPreviewBackgroundModeInput">
-                      <option value="checkerboard">棋盘格</option>
-                      <option value="color">纯色</option>
-                    </select>
-                  </label>
-                  <label id="processPreviewBackgroundColorRow" class="field color-row" hidden>
-                    <span>背景色 <strong id="processPreviewBackgroundLabel">#F6FBF6</strong></span>
-                    <input id="processPreviewBackgroundInput" type="color" value="#f6fbf6">
-                  </label>
-                </div>
-
-                <div class="postprocess-actions">
-                  <button id="greenToBlackButton" class="ghost-button" type="button" hidden>绿边转黑</button>
-                  <button id="greenDesaturateButton" class="ghost-button" type="button" hidden>绿边去饱和</button>
-                  <button id="semiTransparentToBlackButton" class="ghost-button" type="button" hidden>半透明转黑</button>
-                  <button id="semiTransparentToOpaqueButton" class="ghost-button" type="button" hidden>半透明转不透明</button>
-                  <button id="savePreviewButton" class="ghost-button" type="button" hidden>下载预览帧</button>
-                </div>
-
-                <div class="action-bar">
-                  <button id="processButton" class="primary-button large" type="button">开始处理区间</button>
+                  <div class="preview-background-options">
+                    <label class="field">
+                      <span>结果背景</span>
+                      <select id="processPreviewBackgroundModeInput">
+                        <option value="checkerboard">棋盘格</option>
+                        <option value="color">纯色</option>
+                      </select>
+                    </label>
+                    <label id="processPreviewBackgroundColorRow" class="field color-row" hidden>
+                      <span>背景色 <strong id="processPreviewBackgroundLabel">#F6FBF6</strong></span>
+                      <input id="processPreviewBackgroundInput" type="color" value="#f6fbf6">
+                    </label>
+                  </div>
+                  <div class="postprocess-actions">
+                    <button id="savePreviewButton" class="ghost-button compact-button" type="button" hidden>下载预览帧</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -429,43 +563,57 @@
 
           <div class="review-layout">
             <aside class="animation-panel">
-              <div class="animation-stage">
-                <canvas id="animationPreviewCanvas" width="512" height="512"></canvas>
-                <div id="previewEmptyState" class="empty-state">还没有帧</div>
+              <div class="comparison-toolbar">
+                <div>
+                  <strong id="comparisonTitle">有效帧预览</strong>
+                  <span id="scaleResultsState">未处理版本</span>
+                </div>
               </div>
-              <div class="preview-status">
-                <strong id="previewFrameLabel">预览帧</strong>
-                <span id="previewSelectedCount">已加载 0 帧</span>
-              </div>
-              <div id="previewProgressBar" class="preview-progress">
-                <div id="previewProgressFill"></div>
-              </div>
-              <span id="previewProgressLabel" class="progress-label">0 / 0</span>
-              <div class="playback-controls">
-                <button id="previewPlayPauseButton" class="ghost-button" type="button">播放预览</button>
-                <button id="previewRestartButton" class="ghost-button" type="button">重播</button>
-                <label class="checkbox-row compact">
-                  <input id="previewReverseInput" type="checkbox">
-                  <span>反向</span>
-                </label>
-              </div>
-              <div class="form-grid compact-form">
-                <label class="field">
-                  <span>背景 <strong id="previewBackgroundLabel">#F6FBF6</strong></span>
-                  <input id="previewBackgroundInput" type="color" value="#f6fbf6">
-                </label>
-                <label class="field">
-                  <span>间隔 ms</span>
-                  <input id="previewIntervalInput" type="number" min="20" max="5000" step="10" value="100">
-                </label>
-              </div>
-              <div id="magicPreviewPanel" class="magic-preview-panel" hidden>
+              <div id="animationComparisonStrip" class="animation-comparison-strip">
+                <article class="animation-variant-card baseline-preview-card">
+                  <div class="variant-card-heading">
+                    <strong>未处理</strong>
+                    <span>当前选中帧</span>
+                  </div>
+                  <div class="animation-stage">
+                    <canvas id="animationPreviewCanvas" width="512" height="512"></canvas>
+                    <div id="previewEmptyState" class="empty-state">还没有帧</div>
+                  </div>
+                  <div class="preview-status">
+                    <strong id="previewFrameLabel">预览帧</strong>
+                    <span id="previewSelectedCount">已加载 0 帧</span>
+                  </div>
+                  <div id="previewProgressBar" class="preview-progress">
+                    <div id="previewProgressFill"></div>
+                  </div>
+                  <span id="previewProgressLabel" class="progress-label">0 / 0</span>
+                  <div class="magic-output-row">
+                    <span>原尺寸 · 未缩放处理</span>
+                    <button id="originalVariantExportButton" class="ghost-button tiny" type="button">导出</button>
+                  </div>
+                  <div id="originalVariantExportOptions" class="variant-export-options" hidden>
+                    <button class="choice-button compact" type="button" data-original-export="frames">Frames</button>
+                    <button class="choice-button compact" type="button" data-original-export="sprite_sheet">Sprite Sheet</button>
+                    <button class="choice-button compact" type="button" data-original-export="mov">透明 MOV</button>
+                    <button class="choice-button compact" type="button" data-original-export="gif">GIF</button>
+                  </div>
+                </article>
+                <article id="magicFullPreviewPanel" class="magic-preview-panel animation-variant-card" hidden>
+                  <div class="variant-card-heading"><strong>100%</strong><span>ESR 后缩回原尺寸</span></div>
+                  <div class="animation-stage magic-stage"><canvas id="magicFullPreviewCanvas" width="512" height="512"></canvas><div id="magicFullPreviewEmptyState" class="empty-state">等待缩放处理</div></div>
+                  <div class="preview-status"><strong id="magicFullPreviewFrameLabel">100% -</strong><span id="magicFullPreviewSelectedCount">已生成 0 帧</span></div>
+                  <div class="preview-progress magic-progress"><div id="magicFullPreviewProgressFill"></div></div><span id="magicFullPreviewProgressLabel" class="progress-label">0 / 0</span>
+                  <div class="magic-output-row"><span>输出 <strong id="magicFullOutputSizeLabel">-</strong></span><button id="exportMagicFullFramesButton" class="ghost-button tiny" type="button" disabled>导出</button></div>
+                  <div class="variant-export-options" hidden data-variant-export-options="full"><button class="choice-button compact" type="button" data-variant-export="frames" data-variant-key="full">Frames</button><button class="choice-button compact" type="button" data-variant-export="sprite_sheet" data-variant-key="full">Sprite Sheet</button><button class="choice-button compact" type="button" data-variant-export="mov" data-variant-key="full">透明 MOV</button><button class="choice-button compact" type="button" data-variant-export="gif" data-variant-key="full">GIF</button></div>
+                </article>
+              <article id="magicPreviewPanel" class="magic-preview-panel animation-variant-card" hidden>
+                <div class="variant-card-heading"><strong>1/2</strong><span>缩回一半尺寸</span></div>
                 <div class="animation-stage magic-stage">
                   <canvas id="magicPreviewCanvas" width="512" height="512"></canvas>
-                  <div id="magicPreviewEmptyState" class="empty-state">等待 MAGIC</div>
+                  <div id="magicPreviewEmptyState" class="empty-state">等待缩放处理</div>
                 </div>
                 <div class="preview-status">
-                  <strong id="magicPreviewFrameLabel">MAGIC -</strong>
+                  <strong id="magicPreviewFrameLabel">1/2 -</strong>
                   <span id="magicPreviewSelectedCount">已生成 0 帧</span>
                 </div>
                 <div id="magicPreviewProgressBar" class="preview-progress magic-progress">
@@ -474,16 +622,18 @@
                 <span id="magicPreviewProgressLabel" class="progress-label">0 / 0</span>
                 <div class="magic-output-row">
                   <span>输出画布 <strong id="magicOutputSizeLabel">-</strong></span>
-                  <button id="exportMagicFramesButton" class="ghost-button tiny" type="button" disabled>导出处理后帧</button>
+                  <button id="exportMagicFramesButton" class="ghost-button tiny" type="button" disabled>导出</button>
                 </div>
-              </div>
-              <div id="magicQuarterPreviewPanel" class="magic-preview-panel" hidden>
+                <div class="variant-export-options" hidden data-variant-export-options="half"><button class="choice-button compact" type="button" data-variant-export="frames" data-variant-key="half">Frames</button><button class="choice-button compact" type="button" data-variant-export="sprite_sheet" data-variant-key="half">Sprite Sheet</button><button class="choice-button compact" type="button" data-variant-export="mov" data-variant-key="half">透明 MOV</button><button class="choice-button compact" type="button" data-variant-export="gif" data-variant-key="half">GIF</button></div>
+              </article>
+              <article id="magicQuarterPreviewPanel" class="magic-preview-panel animation-variant-card" hidden>
+                <div class="variant-card-heading"><strong>1/4</strong><span>缩回四分之一</span></div>
                 <div class="animation-stage magic-stage">
                   <canvas id="magicQuarterPreviewCanvas" width="512" height="512"></canvas>
-                  <div id="magicQuarterPreviewEmptyState" class="empty-state">等待 MAGIC 1/4</div>
+                  <div id="magicQuarterPreviewEmptyState" class="empty-state">等待缩放处理</div>
                 </div>
                 <div class="preview-status">
-                  <strong id="magicQuarterPreviewFrameLabel">MAGIC 1/4 -</strong>
+                  <strong id="magicQuarterPreviewFrameLabel">1/4 -</strong>
                   <span id="magicQuarterPreviewSelectedCount">已生成 0 帧</span>
                 </div>
                 <div id="magicQuarterPreviewProgressBar" class="preview-progress magic-progress">
@@ -492,16 +642,18 @@
                 <span id="magicQuarterPreviewProgressLabel" class="progress-label">0 / 0</span>
                 <div class="magic-output-row">
                   <span>输出画布 <strong id="magicQuarterOutputSizeLabel">-</strong></span>
-                  <button id="exportMagicQuarterFramesButton" class="ghost-button tiny" type="button" disabled>导出处理后帧</button>
+                  <button id="exportMagicQuarterFramesButton" class="ghost-button tiny" type="button" disabled>导出</button>
                 </div>
-              </div>
-              <div id="magicEighthPreviewPanel" class="magic-preview-panel" hidden>
+                <div class="variant-export-options" hidden data-variant-export-options="quarter"><button class="choice-button compact" type="button" data-variant-export="frames" data-variant-key="quarter">Frames</button><button class="choice-button compact" type="button" data-variant-export="sprite_sheet" data-variant-key="quarter">Sprite Sheet</button><button class="choice-button compact" type="button" data-variant-export="mov" data-variant-key="quarter">透明 MOV</button><button class="choice-button compact" type="button" data-variant-export="gif" data-variant-key="quarter">GIF</button></div>
+              </article>
+              <article id="magicEighthPreviewPanel" class="magic-preview-panel animation-variant-card" hidden>
+                <div class="variant-card-heading"><strong>1/8</strong><span>缩回八分之一</span></div>
                 <div class="animation-stage magic-stage">
                   <canvas id="magicEighthPreviewCanvas" width="512" height="512"></canvas>
-                  <div id="magicEighthPreviewEmptyState" class="empty-state">等待 MAGIC 1/8</div>
+                  <div id="magicEighthPreviewEmptyState" class="empty-state">等待缩放处理</div>
                 </div>
                 <div class="preview-status">
-                  <strong id="magicEighthPreviewFrameLabel">MAGIC 1/8 -</strong>
+                  <strong id="magicEighthPreviewFrameLabel">1/8 -</strong>
                   <span id="magicEighthPreviewSelectedCount">已生成 0 帧</span>
                 </div>
                 <div id="magicEighthPreviewProgressBar" class="preview-progress magic-progress">
@@ -510,7 +662,29 @@
                 <span id="magicEighthPreviewProgressLabel" class="progress-label">0 / 0</span>
                 <div class="magic-output-row">
                   <span>输出画布 <strong id="magicEighthOutputSizeLabel">-</strong></span>
-                  <button id="exportMagicEighthFramesButton" class="ghost-button tiny" type="button" disabled>导出处理后帧</button>
+                  <button id="exportMagicEighthFramesButton" class="ghost-button tiny" type="button" disabled>导出</button>
+                </div>
+                <div class="variant-export-options" hidden data-variant-export-options="eighth"><button class="choice-button compact" type="button" data-variant-export="frames" data-variant-key="eighth">Frames</button><button class="choice-button compact" type="button" data-variant-export="sprite_sheet" data-variant-key="eighth">Sprite Sheet</button><button class="choice-button compact" type="button" data-variant-export="mov" data-variant-key="eighth">透明 MOV</button><button class="choice-button compact" type="button" data-variant-export="gif" data-variant-key="eighth">GIF</button></div>
+              </article>
+              </div>
+              <div class="comparison-shared-controls">
+                <div class="playback-controls">
+                  <button id="previewPlayPauseButton" class="ghost-button" type="button">播放预览</button>
+                  <button id="previewRestartButton" class="ghost-button" type="button">重播</button>
+                  <label class="checkbox-row compact">
+                    <input id="previewReverseInput" type="checkbox">
+                    <span>反向</span>
+                  </label>
+                </div>
+                <div class="form-grid compact-form">
+                  <label class="field">
+                    <span>背景 <strong id="previewBackgroundLabel">#F6FBF6</strong></span>
+                    <input id="previewBackgroundInput" type="color" value="#f6fbf6">
+                  </label>
+                  <label class="field">
+                    <span>间隔 ms</span>
+                    <input id="previewIntervalInput" type="number" min="20" max="5000" step="10" value="100">
+                  </label>
                 </div>
               </div>
             </aside>
@@ -536,24 +710,45 @@
           </div>
 
           <div class="export-bar">
-            <button id="exportButton" class="primary-button large" type="button">导出选中帧</button>
-            <div class="magic-controls">
-              <label class="magic-realesrgan-option">
-                <input id="magicUseRealesrganInput" type="checkbox" checked>
-                <span>Real-ESRGAN</span>
-              </label>
-              <div class="magic-resize-mode" role="group" aria-label="MAGIC 缩放算法">
-                <label class="magic-resize-option">
-                  <input id="magicResizeHardInput" type="checkbox" value="hard" checked>
-                  <span>硬</span>
-                </label>
-                <label class="magic-resize-option">
-                  <input id="magicResizeSoftInput" type="checkbox" value="soft">
-                  <span>软</span>
-                </label>
+            <button id="exportButton" class="primary-button large" type="button" aria-expanded="false" aria-controls="exportOptions">直接导出</button>
+            <button id="scaleProcessToggleButton" class="magic-button large" type="button" aria-expanded="false" aria-controls="scaleProcessingControls">缩放处理</button>
+          </div>
+          <div id="scaleProcessingControls" class="scale-processing-controls" hidden>
+            <div class="scale-control-group">
+              <span class="scale-control-label">增强</span>
+              <button id="magicUseRealesrganButton" class="choice-button is-selected" type="button" aria-pressed="true">Real-ESRGAN</button>
+            </div>
+            <div class="scale-control-group">
+              <span class="scale-control-label">输出尺寸（可多选）</span>
+              <div id="scaleVariantButtons" class="choice-button-row">
+                <button class="choice-button" type="button" data-scale-variant="full" aria-pressed="false" title="ESR ×4 后缩回原尺寸">100%</button>
+                <button class="choice-button is-selected" type="button" data-scale-variant="half" aria-pressed="true">1/2</button>
+                <button class="choice-button" type="button" data-scale-variant="quarter" aria-pressed="false">1/4</button>
+                <button class="choice-button" type="button" data-scale-variant="eighth" aria-pressed="false">1/8</button>
               </div>
             </div>
-            <button id="magicButton" class="magic-button large" type="button">MAGIC</button>
+            <div class="scale-control-group scale-mode-group">
+              <span class="scale-control-label">缩放方式（二选一）</span>
+              <div class="choice-button-row">
+                <button id="magicResizeHardButton" class="choice-button is-selected" type="button" aria-pressed="true">硬</button>
+                <button id="magicResizeSoftButton" class="choice-button" type="button" aria-pressed="false">软</button>
+              </div>
+              <p id="scaleModeExplanation" class="scale-mode-explanation">硬：最近邻缩小，像素边缘更利落；适合像素风和清晰硬边。</p>
+            </div>
+            <div class="scale-processing-actions">
+              <button id="magicButton" class="primary-button large" type="button">开始缩放处理</button>
+              <span id="scaleProcessingHint">只补算新增帧和缺少的尺寸，已有结果直接复用。</span>
+            </div>
+          </div>
+          <div id="exportOptions" class="export-options" hidden>
+            <strong>选择需要生成的内容</strong>
+            <span>只会生成你点击的格式。</span>
+            <div class="export-option-buttons">
+              <button id="exportFramesButton" class="ghost-button" type="button">Frames</button>
+              <button id="exportSpriteSheetButton" class="ghost-button" type="button">Spritesheet</button>
+              <button id="exportMovButton" class="ghost-button" type="button">透明 MOV</button>
+              <button id="exportGifButton" class="ghost-button" type="button">GIF</button>
+            </div>
           </div>
           <div id="exportResult" class="export-result" hidden></div>
         </section>
