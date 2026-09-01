@@ -50,8 +50,13 @@ MAGIC_DIR = WORK_DIR / "magic"
 SETTINGS_PATH = WORK_DIR / "settings.json"
 LEGACY_SETTINGS_PATH = DEFAULT_WORK_DIR / "settings.json"
 MANAGED_RUNTIME_DIRS = (UPLOADS_DIR, JOBS_DIR, EXPORTS_DIR, PREVIEWS_DIR, LINE_CLEANER_DIR, MAGIC_DIR)
+RUNTIME_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 GENERATED_EXPORT_DIR_PATTERN = re.compile(
-    r"^\d{8}-\d{6}-[0-9a-f]{4}-(?:export|magic-(?:half|quarter|eighth)-frames)$"
+    r"^\d{8}-\d{6}-[0-9a-f]{4}-(?:"
+    r"export|"
+    r"magic-(?:half|quarter|eighth)-frames|"
+    r"scale-(?:full|half|quarter|eighth)-(?:frames|sprite_sheet|mov|gif)"
+    r")$"
 )
 MAGIC_PREVIEW_LOCK = threading.Lock()
 
@@ -215,6 +220,13 @@ def ensure_runtime_dirs() -> None:
     migrate_legacy_settings()
 
 
+def validate_runtime_id(value: object, label: str) -> str:
+    normalized = str(value or "").strip()
+    if normalized in {"", ".", ".."} or not RUNTIME_ID_PATTERN.fullmatch(normalized):
+        raise ValueError(f"invalid {label} id")
+    return normalized
+
+
 def clear_managed_runtime_files(confirmed: bool) -> dict:
     if confirmed is not True:
         raise ValueError("必须确认后才能清空 WebApp 文件。")
@@ -230,7 +242,7 @@ def clear_managed_runtime_files(confirmed: bool) -> dict:
         runtime_targets.append(target)
 
     export_targets = []
-    export_root = configured_exports_dir()
+    export_root = configured_exports_dir().resolve()
     if export_root != EXPORTS_DIR.resolve() and export_root.exists():
         if not export_root.is_dir():
             raise ValueError(f"输出路径不是文件夹：{export_root}")
@@ -1064,6 +1076,12 @@ def is_within_root(path: Path, root: Path) -> bool:
         return False
 
 
+def is_openable_directory(path: Path) -> bool:
+    target = path.expanduser().resolve()
+    roots = (WORK_DIR.resolve(), configured_exports_dir().resolve())
+    return target.is_dir() and any(is_within_root(target, root) for root in roots)
+
+
 def open_rgba_image(path: Path) -> Image.Image:
     with Image.open(path) as image:
         return image.convert("RGBA")
@@ -1388,7 +1406,7 @@ def media_info(path: Path, media_type: str | None = None) -> dict:
 
 
 def upload_dir(upload_id: str) -> Path:
-    return UPLOADS_DIR / upload_id
+    return UPLOADS_DIR / validate_runtime_id(upload_id, "upload")
 
 
 def upload_manifest_path(upload_id: str) -> Path:
@@ -2854,7 +2872,7 @@ def resize_frames_on_source_canvas(
 
 
 def job_dir(job_id: str) -> Path:
-    return JOBS_DIR / job_id
+    return JOBS_DIR / validate_runtime_id(job_id, "job")
 
 
 def job_manifest_path(job_id: str) -> Path:
@@ -3228,13 +3246,11 @@ def process_video_to_job(
 
 
 def preview_dir(preview_id: str) -> Path:
-    return PREVIEWS_DIR / preview_id
+    return PREVIEWS_DIR / validate_runtime_id(preview_id, "preview")
 
 
 def load_preview_manifest(preview_id: str) -> dict:
-    preview_id = str(preview_id or "").strip()
-    if not preview_id or Path(preview_id).name != preview_id:
-        raise ValueError("invalid preview id")
+    preview_id = validate_runtime_id(preview_id, "preview")
     path = preview_dir(preview_id) / "preview.json"
     if not path.exists():
         raise FileNotFoundError(f"preview not found: {preview_id}")
@@ -4044,7 +4060,7 @@ def import_animation_frames_to_job(file_items: list) -> dict:
 
 
 def line_cleaner_dir(run_id: str) -> Path:
-    return LINE_CLEANER_DIR / run_id
+    return LINE_CLEANER_DIR / validate_runtime_id(run_id, "line-cleaner")
 
 
 def resolve_realesrgan_binary() -> str | None:
@@ -5101,9 +5117,7 @@ def magic_preview_job(
 
 
 def load_magic_manifest(magic_id: str) -> dict:
-    magic_id = str(magic_id or "").strip()
-    if not magic_id or Path(magic_id).name != magic_id:
-        raise ValueError("invalid scale-processing id")
+    magic_id = validate_runtime_id(magic_id, "scale-processing")
     path = MAGIC_DIR / f"{magic_id}-magic" / "manifest.json"
     if not path.exists():
         raise FileNotFoundError(f"scale-processing result not found: {magic_id}")
@@ -5750,9 +5764,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/open-path":
                 payload = self.read_json_body()
-                target = Path(str(payload.get("path") or "").strip()).expanduser().resolve()
-                if not target.exists():
-                    raise FileNotFoundError(target)
+                target = Path(str(payload.get("path") or "").strip()).expanduser()
+                if not is_openable_directory(target):
+                    raise ValueError("path is not an openable directory")
                 open_path_in_file_browser(target)
                 self.send_json({"ok": True})
                 return
