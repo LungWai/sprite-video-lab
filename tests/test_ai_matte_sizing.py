@@ -1,5 +1,7 @@
 import json
+import sys
 import tempfile
+import types
 import unittest
 import zipfile
 from pathlib import Path
@@ -8,6 +10,13 @@ from unittest import mock
 from PIL import Image
 
 import server
+
+
+def fake_huggingface_hub(**functions):
+    module = types.ModuleType("huggingface_hub")
+    for name, function in functions.items():
+        setattr(module, name, function)
+    return mock.patch.dict(sys.modules, {"huggingface_hub": module})
 
 
 class AiMatteSizingTests(unittest.TestCase):
@@ -626,9 +635,11 @@ class AiMatteSizingTests(unittest.TestCase):
         self.assertEqual(result["installed_models"], ["birefnet-hr-matting"])
 
     def test_birefnet_download_limits_snapshot_to_required_hr_files(self):
+        snapshot_download = mock.Mock()
         with (
+            fake_huggingface_hub(snapshot_download=snapshot_download),
+            mock.patch.object(server, "require_ai_runtime_for_components"),
             mock.patch.object(server, "configure_ai_model_cache", return_value=Path("model-cache")),
-            mock.patch("huggingface_hub.snapshot_download") as snapshot_download,
         ):
             result = server.download_birefnet_model("birefnet-general")
 
@@ -641,9 +652,11 @@ class AiMatteSizingTests(unittest.TestCase):
         )
 
     def test_corridorkey_download_fetches_pinned_selected_checkpoint(self):
+        hf_hub_download = mock.Mock()
         with (
+            fake_huggingface_hub(hf_hub_download=hf_hub_download),
+            mock.patch.object(server, "require_ai_runtime_for_components"),
             mock.patch.object(server, "default_corridorkey_root", return_value=Path("corridor-root")),
-            mock.patch("huggingface_hub.hf_hub_download") as hf_hub_download,
         ):
             result = server.download_corridorkey_checkpoint("blue")
 
@@ -1016,6 +1029,12 @@ class AiMatteSizingTests(unittest.TestCase):
             def fake_stable_resize(frames, *_args, **_kwargs):
                 return [frames[0].copy()], [None], 1.0, frames[0].size
 
+            production_context = {
+                "production_id": "production-7",
+                "scene_id": "scene-12",
+                "shot_id": "shot-3",
+                "shot_version_id": "shot-3-v2",
+            }
             with (
                 mock.patch.object(server, "JOBS_DIR", jobs_dir),
                 mock.patch.object(server, "source_media_entry", return_value=(source_path, "image")),
@@ -1056,12 +1075,18 @@ class AiMatteSizingTests(unittest.TestCase):
                     corridorkey_enabled=False,
                     corridorkey_screen="auto",
                     preprocess_esr_smoothing=True,
+                    production_context=production_context,
+                )
+                self.assertEqual(
+                    json.loads(server.job_manifest_path(result["job_id"]).read_text(encoding="utf-8"))["production_context"],
+                    production_context,
                 )
 
             self.assertEqual(observed["matte_input"], (70, 120, 180, 255))
             self.assertEqual(observed["smoothing_root"].name, "esr-smoothing")
             self.assertTrue(result["options"]["preprocess_esr_smoothing"])
             self.assertTrue(result["options"]["preprocess_esr"]["restored_to_source_size"])
+            self.assertEqual(result["production_context"], production_context)
 
     def test_single_preview_background_cleanup_reads_manifest_key_color(self):
         with tempfile.TemporaryDirectory() as temp_dir:
