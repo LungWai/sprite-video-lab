@@ -9,6 +9,21 @@ from unittest import mock
 import server
 
 
+def build_multipart_body(boundary, parts):
+    chunks = []
+    for part in parts:
+        chunks.append(f"--{boundary}\r\n".encode("ascii"))
+        disposition = f'Content-Disposition: form-data; name="{part["name"]}"'
+        if part.get("filename") is not None:
+            disposition += f'; filename="{part["filename"]}"'
+        chunks.append((disposition + "\r\n").encode("utf-8"))
+        if part.get("content_type"):
+            chunks.append(f'Content-Type: {part["content_type"]}\r\n'.encode("ascii"))
+        chunks.append(b"\r\n" + part["data"] + b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode("ascii"))
+    return b"".join(chunks)
+
+
 class LiveServerTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()

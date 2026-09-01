@@ -1,4 +1,5 @@
 import http.client
+import io
 import json
 import os
 import socket
@@ -6,10 +7,11 @@ import threading
 import unittest
 from http import HTTPStatus
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import server
-from tests.http_test_support import LiveServerTestCase
+from tests.http_test_support import LiveServerTestCase, build_multipart_body
 
 
 class ByteRangeTests(unittest.TestCase):
@@ -486,6 +488,351 @@ class RequestBoundaryHttpTests(LiveServerTestCase):
         status, headers, _ = self.request("GET", "/api/runtime-info")
         self.assertEqual(status, 200)
         self.assertEqual(headers.get("Cache-Control"), "no-store")
+
+
+class MultipartHttpTests(LiveServerTestCase):
+    boundary = "----SpriteVideoLabBoundary7MA4YWxkTrZu0gW"
+
+    class RecordingBody(io.BytesIO):
+        def __init__(self, value):
+            super().__init__(value)
+            self.read_sizes = []
+
+        def read(self, size=-1):
+            self.read_sizes.append(size)
+            return super().read(size)
+
+    def multipart_headers(self, boundary=None):
+        return {"Content-Type": f"multipart/form-data; boundary={boundary or self.boundary}"}
+
+    def parser_handler(self, body, *, content_length=None, content_type=None, stream=None):
+        raw_headers = (
+            f"Content-Type: {content_type or 'multipart/form-data; boundary=' + self.boundary}\r\n"
+            f"Content-Length: {len(body) if content_length is None else content_length}\r\n"
+            "\r\n"
+        ).encode("latin-1")
+        handler = object.__new__(server.AppHandler)
+        handler.headers = http.client.parse_headers(io.BytesIO(raw_headers))
+        handler.rfile = stream or io.BytesIO(body)
+        handler.server = SimpleNamespace(max_upload_bytes=8 * 1024 * 1024 * 1024)
+        return handler
+
+    def test_upload_route_preserves_repeated_video_files_and_utf8_filenames(self):
+        parts = [
+            {
+                "name": "video",
+                "filename": "clip-01.mp4",
+                "content_type": "video/mp4",
+                "data": b"first-video",
+            },
+            {
+                "name": "video",
+                "filename": "\u7247\u6bb5-02.mov",
+                "content_type": "video/quicktime",
+                "data": b"second-video",
+            },
+        ]
+        captured = {}
+
+        def inspect_files(files):
+            captured["files"] = files
+            captured["positions"] = [item.file.tell() for item in files]
+            captured["payloads"] = [item.file.read() for item in files]
+            return {"upload_id": "upload-test"}
+
+        with mock.patch.object(server, "register_uploaded_media", side_effect=inspect_files) as register:
+            status, _, payload = self.request(
+                "POST",
+                "/api/upload",
+                body=build_multipart_body(self.boundary, parts),
+                headers=self.multipart_headers(),
+            )
+
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(json.loads(payload)["upload"]["upload_id"], "upload-test")
+        register.assert_called_once()
+        self.assertEqual([item.filename for item in captured["files"]], ["clip-01.mp4", "\u7247\u6bb5-02.mov"])
+        self.assertEqual([item.type for item in captured["files"]], ["video/mp4", "video/quicktime"])
+        self.assertEqual(captured["positions"], [0, 0])
+        self.assertEqual(captured["payloads"], [b"first-video", b"second-video"])
+        self.assertTrue(all(item.file.closed for item in captured["files"]))
+
+    def test_animation_route_preserves_repeated_frames_and_latin1_filename_fallback(self):
+        latin1_filename = "caf\u00e9-02.png"
+        parts = [
+            {
+                "name": "frames",
+                "filename": "frame-01.png",
+                "content_type": "image/png",
+                "data": b"first-frame",
+            },
+            {
+                "name": "frames",
+                "filename": latin1_filename,
+                "content_type": "image/png",
+                "data": b"second-frame",
+            },
+        ]
+        body = build_multipart_body(self.boundary, parts).replace(
+            latin1_filename.encode("utf-8"),
+            latin1_filename.encode("latin-1"),
+            1,
+        )
+        captured = {}
+
+        def inspect_files(files):
+            captured["files"] = files
+            captured["positions"] = [item.file.tell() for item in files]
+            captured["payloads"] = [item.file.read() for item in files]
+            return {"job_id": "animation-test"}
+
+        with mock.patch.object(server, "import_animation_frames_to_job", side_effect=inspect_files):
+            status, _, payload = self.request(
+                "POST",
+                "/api/import-animation",
+                body=body,
+                headers=self.multipart_headers(),
+            )
+
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(json.loads(payload)["job"]["job_id"], "animation-test")
+        self.assertEqual([item.filename for item in captured["files"]], ["frame-01.png", latin1_filename])
+        self.assertEqual(captured["positions"], [0, 0])
+        self.assertEqual(captured["payloads"], [b"first-frame", b"second-frame"])
+        self.assertTrue(all(item.file.closed for item in captured["files"]))
+
+    def test_line_cleaner_route_uses_first_repeated_fields_and_existing_clamps(self):
+        parts = [
+            {
+                "name": "frames",
+                "filename": "frame.png",
+                "content_type": "image/png",
+                "data": b"frame-data",
+            },
+            {"name": "method", "data": b"classic"},
+            {"name": "method", "data": b"realesrgan_anime"},
+            {"name": "output_scale", "data": b"1.75"},
+            {"name": "alpha_cutoff", "data": b"-4"},
+            {"name": "sharpen_percent", "data": b"999"},
+            {"name": "color_count", "data": b"1"},
+        ]
+        captured = {}
+
+        def inspect_files(files, **kwargs):
+            captured["files"] = files
+            captured["position"] = files[0].file.tell()
+            captured["payload"] = files[0].file.read()
+            captured["kwargs"] = kwargs
+            return {"run_id": "cleaner-test"}
+
+        with mock.patch.object(server, "process_line_cleaner_frames", side_effect=inspect_files):
+            status, _, payload = self.request(
+                "POST",
+                "/api/line-cleaner-process",
+                body=build_multipart_body(self.boundary, parts),
+                headers=self.multipart_headers(),
+            )
+
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(json.loads(payload)["result"]["run_id"], "cleaner-test")
+        self.assertEqual(captured["position"], 0)
+        self.assertEqual(captured["payload"], b"frame-data")
+        self.assertEqual(
+            captured["kwargs"],
+            {
+                "method": "classic",
+                "scale": 1.75,
+                "alpha_cutoff": 0,
+                "sharpen_percent": 300,
+                "color_count": 2,
+            },
+        )
+        self.assertTrue(captured["files"][0].file.closed)
+
+    def test_parser_reads_exact_length_in_mib_chunks_and_spools_large_file(self):
+        self.assertTrue(
+            hasattr(server.AppHandler, "read_multipart_form"),
+            "shared multipart parser adapter is missing",
+        )
+        large_payload = b"x" * ((1024 * 1024) + 1)
+        body = build_multipart_body(
+            self.boundary,
+            [
+                {"name": "mode", "data": b"first"},
+                {"name": "mode", "data": b"second"},
+                {
+                    "name": "video",
+                    "filename": "large.bin",
+                    "content_type": "application/octet-stream",
+                    "data": large_payload,
+                },
+            ],
+        )
+        stream = self.RecordingBody(body + b"unread-trailer")
+        handler = self.parser_handler(body, stream=stream)
+
+        with handler.read_multipart_form() as form:
+            upload = form.files("video")[0]
+            resource = upload.file
+            self.assertEqual(form.getfirst("mode"), "first")
+            self.assertEqual(upload.filename, "large.bin")
+            self.assertEqual(upload.type, "application/octet-stream")
+            self.assertEqual(resource.tell(), 0)
+            self.assertNotIsInstance(resource, io.BytesIO)
+            self.assertEqual(resource.read(), large_payload)
+            self.assertEqual(stream.read_sizes, [1024 * 1024, len(body) - (1024 * 1024)])
+
+        self.assertTrue(resource.closed)
+        self.assertEqual(stream.read(), b"unread-trailer")
+
+    def test_incomplete_parser_closes_files_exposed_by_completed_parts(self):
+        self.assertTrue(
+            hasattr(server.AppHandler, "read_multipart_form") and hasattr(server, "UploadedFormFile"),
+            "context-managed multipart adapter is missing",
+        )
+        body = build_multipart_body(
+            self.boundary,
+            [
+                {
+                    "name": "video",
+                    "filename": "complete.mp4",
+                    "content_type": "video/mp4",
+                    "data": b"complete",
+                },
+                {
+                    "name": "video",
+                    "filename": "incomplete.mp4",
+                    "content_type": "video/mp4",
+                    "data": b"incomplete",
+                },
+            ],
+        )
+        closing_boundary = f"--{self.boundary}--\r\n".encode("ascii")
+        incomplete_body = body[: -len(closing_boundary)]
+        handler = self.parser_handler(incomplete_body)
+        uploaded_form_file = server.UploadedFormFile
+        exposed_resources = []
+
+        def retain_resource(*args, **kwargs):
+            uploaded = uploaded_form_file(*args, **kwargs)
+            exposed_resources.append(uploaded.file)
+            return uploaded
+
+        with mock.patch.object(server, "UploadedFormFile", side_effect=retain_resource):
+            with self.assertRaises(server.RequestError) as caught:
+                handler.read_multipart_form()
+
+        self.assertEqual(caught.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertTrue(exposed_resources)
+        self.assertTrue(all(resource.closed for resource in exposed_resources))
+
+    def test_multipart_routes_reject_invalid_framing_with_structured_statuses(self):
+        self.assertTrue(
+            hasattr(server.AppHandler, "read_multipart_form"),
+            "shared multipart parser adapter is missing",
+        )
+        complete = build_multipart_body(
+            self.boundary,
+            [{"name": "video", "filename": "clip.mp4", "data": b"video"}],
+        )
+        incomplete = complete[:-4]
+        cases = (
+            (b"not-multipart", {"Content-Type": "application/octet-stream"}, 415),
+            (b"not-multipart", {"Content-Type": "multipart/form-data"}, 400),
+            (b"", self.multipart_headers(), 411),
+            (b"", {**self.multipart_headers(), "Content-Length": "-1"}, 400),
+            (b"", {**self.multipart_headers(), "Content-Length": "12x"}, 400),
+            (incomplete, self.multipart_headers(), 400),
+        )
+
+        for body, headers, expected_status in cases:
+            with self.subTest(headers=headers, body=body[:20]):
+                status, response_headers, payload = self.request(
+                    "POST",
+                    "/api/upload",
+                    body=body,
+                    headers=headers,
+                )
+                self.assertEqual(status, expected_status, payload)
+                self.assertEqual(response_headers.get("Content-Type"), "application/json; charset=utf-8")
+                self.assertFalse(json.loads(payload)["ok"])
+
+    def test_multipart_route_rejects_advertised_body_over_configured_limit(self):
+        body = build_multipart_body(
+            self.boundary,
+            [{"name": "video", "filename": "clip.mp4", "data": b"video"}],
+        )
+        self.httpd.max_upload_bytes = len(body) - 1
+
+        with mock.patch.object(
+            server,
+            "register_uploaded_media",
+            return_value={"upload_id": "must-not-run"},
+        ) as register:
+            status, _, payload = self.request(
+                "POST",
+                "/api/upload",
+                body=body,
+                headers=self.multipart_headers(),
+            )
+
+        self.assertEqual(status, 413, payload)
+        self.assertFalse(json.loads(payload)["ok"])
+        register.assert_not_called()
+
+    def test_multipart_route_rejects_more_than_4096_parts(self):
+        body = build_multipart_body(
+            self.boundary,
+            [
+                *({"name": "field", "data": b"x"} for _ in range(4096)),
+                {"name": "video", "filename": "clip.mp4", "data": b"video"},
+            ],
+        )
+
+        with mock.patch.object(
+            server,
+            "register_uploaded_media",
+            return_value={"upload_id": "must-not-run"},
+        ) as register:
+            status, _, payload = self.request(
+                "POST",
+                "/api/upload",
+                body=body,
+                headers=self.multipart_headers(),
+            )
+
+        self.assertEqual(status, 400, payload)
+        self.assertFalse(json.loads(payload)["ok"])
+        register.assert_not_called()
+
+    def test_multipart_route_enforces_per_part_header_count_and_size_limits(self):
+        prefix = f"--{self.boundary}\r\n".encode("ascii")
+        suffix = f"\r\nvalue\r\n--{self.boundary}--\r\n".encode("ascii")
+        disposition = b'Content-Disposition: form-data; name="video"; filename="clip.mp4"\r\n'
+        too_many_headers = prefix + disposition + b"".join(
+            f"X-Test-{index}: value\r\n".encode("ascii") for index in range(8)
+        ) + suffix
+        oversized_header = prefix + disposition + b"X-Large: " + (b"x" * 4224) + b"\r\n" + suffix
+
+        for body in (too_many_headers, oversized_header):
+            with self.subTest(body_length=len(body)), mock.patch.object(
+                server,
+                "register_uploaded_media",
+                return_value={"upload_id": "must-not-run"},
+            ) as register:
+                status, _, payload = self.request(
+                    "POST",
+                    "/api/upload",
+                    body=body,
+                    headers=self.multipart_headers(),
+                )
+                self.assertEqual(status, 400, payload)
+                self.assertFalse(json.loads(payload)["ok"])
+                register.assert_not_called()
+
+    def test_default_multipart_body_limit_is_eight_gibibytes(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(server.configured_max_upload_bytes(), 8 * 1024 * 1024 * 1024)
 
 
 class ProcessRouteHttpTests(LiveServerTestCase):

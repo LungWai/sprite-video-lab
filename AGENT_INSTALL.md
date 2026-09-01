@@ -6,7 +6,7 @@ This guide is for coding agents setting up Sprite Video Lab for a user. Do not a
 
 - Target OS: Windows.
 - Project root: the cloned `sprite-video-lab` repository.
-- Runtime: local Python HTTP server, ffmpeg/ffprobe, optional AI matting runtime, optional Real-ESRGAN line-cleaner runtime.
+- Runtime: Python 3.10+ local HTTP server, ffmpeg/ffprobe, optional AI matting runtime, optional Real-ESRGAN line-cleaner runtime.
 - User-facing URL after setup: `http://127.0.0.1:8894`.
 
 ## 1. Inspect The Workspace
@@ -32,7 +32,7 @@ python -m venv .venv
 Verify the base server imports:
 
 ```powershell
-.\.venv\Scripts\python.exe -m py_compile server.py
+.\.venv\Scripts\python.exe -c "import PIL, python_multipart, server"
 ```
 
 ## 3. Provide ffmpeg And ffprobe

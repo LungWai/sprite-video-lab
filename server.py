@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import cgi
 import colorsys
 import importlib.util
 import ipaddress
@@ -26,10 +25,13 @@ from fractions import Fraction
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import urlparse, urlsplit
 from urllib.request import Request, urlopen
 
 from PIL import Image, ImageChops, ImageFilter
+from python_multipart import FormParser
+from python_multipart.multipart import parse_options_header
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -65,7 +67,12 @@ GENERATED_EXPORT_DIR_PATTERN = re.compile(
 )
 MAGIC_PREVIEW_LOCK = threading.Lock()
 MAX_JSON_BODY_BYTES = 1024 * 1024
-DEFAULT_MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+DEFAULT_MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024
+MULTIPART_READ_CHUNK_BYTES = 1024 * 1024
+MULTIPART_MEMORY_FILE_BYTES = 1024 * 1024
+MULTIPART_MAX_PARTS = 4096
+MULTIPART_MAX_HEADER_COUNT = 8
+MULTIPART_MAX_HEADER_SIZE = 4096 + 128
 ALLOWED_HOSTS_ENV = "SPRITE_VIDEO_LAB_ALLOWED_HOSTS"
 MAX_UPLOAD_BYTES_ENV = "SPRITE_VIDEO_LAB_MAX_UPLOAD_BYTES"
 CONTENT_SECURITY_POLICY = (
@@ -90,6 +97,37 @@ class RequestError(ValueError):
     def __init__(self, status: HTTPStatus, message: str):
         super().__init__(message)
         self.status = status
+
+
+@dataclass
+class UploadedFormFile:
+    filename: str
+    type: str
+    file: BinaryIO
+
+
+class ParsedMultipartForm:
+    def __init__(self, fields, file_fields, resources):
+        self._fields = fields
+        self._file_fields = file_fields
+        self._resources = resources
+
+    def files(self, key: str) -> list[UploadedFormFile]:
+        return list(self._file_fields.get(key, ()))
+
+    def getfirst(self, key: str, default=None):
+        values = self._fields.get(key)
+        return values[0] if values else default
+
+    def close(self) -> None:
+        for resource in reversed(self._resources):
+            resource.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc_info):
+        self.close()
 
 
 def parse_content_length(value: str | None, *, required: bool, maximum: int) -> int:
@@ -4135,13 +4173,6 @@ def natural_sort_key(value: str) -> list[object]:
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", value)]
 
 
-def field_storage_items(form: cgi.FieldStorage, key: str) -> list:
-    if key not in form:
-        return []
-    value = form[key]
-    return value if isinstance(value, list) else [value]
-
-
 def import_animation_frames_to_job(file_items: list) -> dict:
     candidates = []
     for item in file_items:
@@ -5761,52 +5792,25 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "upload": result})
                 return
             if parsed.path == "/api/upload":
-                form = cgi.FieldStorage(
-                    fp=self.rfile,
-                    headers=self.headers,
-                    environ={
-                        "REQUEST_METHOD": "POST",
-                        "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                        "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
-                    },
-                )
-                file_items = field_storage_items(form, "video")
-                if not file_items:
-                    raise ValueError("media file missing")
-                result = register_uploaded_media(file_items)
+                with self.read_multipart_form() as form:
+                    result = register_uploaded_media(form.files("video"))
                 self.send_json({"ok": True, "upload": result})
                 return
             if parsed.path == "/api/import-animation":
-                form = cgi.FieldStorage(
-                    fp=self.rfile,
-                    headers=self.headers,
-                    environ={
-                        "REQUEST_METHOD": "POST",
-                        "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                        "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
-                    },
-                )
-                result = import_animation_frames_to_job(field_storage_items(form, "frames"))
+                with self.read_multipart_form() as form:
+                    result = import_animation_frames_to_job(form.files("frames"))
                 self.send_json({"ok": True, "job": result})
                 return
             if parsed.path == "/api/line-cleaner-process":
-                form = cgi.FieldStorage(
-                    fp=self.rfile,
-                    headers=self.headers,
-                    environ={
-                        "REQUEST_METHOD": "POST",
-                        "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                        "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
-                    },
-                )
-                result = process_line_cleaner_frames(
-                    field_storage_items(form, "frames"),
-                    method=str(form.getfirst("method", "classic")),
-                    scale=clamp_float(safe_float(form.getfirst("scale", form.getfirst("output_scale", 0.5)), 0.5), 0.05, 2.0),
-                    alpha_cutoff=clamp_int(safe_int(form.getfirst("alpha_cutoff", 8), 8), 0, 255),
-                    sharpen_percent=clamp_int(safe_int(form.getfirst("sharpen_percent", 80), 80), 0, 300),
-                    color_count=clamp_int(safe_int(form.getfirst("color_count", 128), 128), 2, 256),
-                )
+                with self.read_multipart_form() as form:
+                    result = process_line_cleaner_frames(
+                        form.files("frames"),
+                        method=str(form.getfirst("method", "classic")),
+                        scale=clamp_float(safe_float(form.getfirst("scale", form.getfirst("output_scale", 0.5)), 0.5), 0.05, 2.0),
+                        alpha_cutoff=clamp_int(safe_int(form.getfirst("alpha_cutoff", 8), 8), 0, 255),
+                        sharpen_percent=clamp_int(safe_int(form.getfirst("sharpen_percent", 80), 80), 0, 300),
+                        color_count=clamp_int(safe_int(form.getfirst("color_count", 128), 128), 2, 256),
+                    )
                 self.send_json({"ok": True, "result": result})
                 return
             if parsed.path == "/api/process":
@@ -6021,6 +6025,105 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def read_multipart_form(self) -> ParsedMultipartForm:
+        try:
+            content_type, options = parse_options_header(self.headers.get("Content-Type"))
+        except (UnicodeError, ValueError) as exc:
+            raise RequestError(HTTPStatus.BAD_REQUEST, "invalid multipart Content-Type") from exc
+        if content_type != b"multipart/form-data":
+            raise RequestError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "multipart/form-data is required")
+        boundary = options.get(b"boundary")
+        if not boundary:
+            raise RequestError(HTTPStatus.BAD_REQUEST, "multipart boundary is required")
+
+        maximum = getattr(self.server, "max_upload_bytes", None)
+        if maximum is None:
+            maximum = configured_max_upload_bytes()
+        length = parse_content_length(
+            self.headers.get("Content-Length"),
+            required=True,
+            maximum=maximum,
+        )
+
+        fields: dict[str, list[str]] = {}
+        file_fields: dict[str, list[UploadedFormFile]] = {}
+        resources = []
+        part_count = 0
+        parser_ended = False
+
+        def decode_text(value: bytes | None) -> str:
+            raw = value or b""
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return raw.decode("latin-1")
+
+        def count_part() -> None:
+            nonlocal part_count
+            part_count += 1
+            if part_count > MULTIPART_MAX_PARTS:
+                raise RequestError(HTTPStatus.BAD_REQUEST, "too many multipart parts")
+
+        def on_field(field) -> None:
+            count_part()
+            name = decode_text(field.field_name)
+            fields.setdefault(name, []).append(decode_text(field.value))
+
+        def on_file(file) -> None:
+            resources.append(file)
+            count_part()
+            file.file_object.seek(0)
+            name = decode_text(file.field_name)
+            file_fields.setdefault(name, []).append(
+                UploadedFormFile(
+                    filename=decode_text(file.file_name),
+                    type=str(file.content_type or ""),
+                    file=file.file_object,
+                )
+            )
+
+        def on_end() -> None:
+            nonlocal parser_ended
+            parser_ended = True
+
+        try:
+            parser = FormParser(
+                "multipart/form-data",
+                on_field,
+                on_file,
+                on_end=on_end,
+                boundary=boundary,
+                config={
+                    "MAX_BODY_SIZE": maximum,
+                    "MAX_MEMORY_FILE_SIZE": MULTIPART_MEMORY_FILE_BYTES,
+                    "MAX_HEADER_COUNT": MULTIPART_MAX_HEADER_COUNT,
+                    "MAX_HEADER_SIZE": MULTIPART_MAX_HEADER_SIZE,
+                },
+            )
+            resources.append(parser)
+            remaining = length
+            while remaining:
+                chunk = self.rfile.read(min(MULTIPART_READ_CHUNK_BYTES, remaining))
+                if not chunk:
+                    raise RequestError(HTTPStatus.BAD_REQUEST, "incomplete request body")
+                if parser.write(chunk) != len(chunk):
+                    raise RequestError(HTTPStatus.BAD_REQUEST, "invalid multipart body")
+                remaining -= len(chunk)
+            parser.finalize()
+            if not parser_ended:
+                raise RequestError(HTTPStatus.BAD_REQUEST, "incomplete multipart body")
+        except Exception as exc:
+            for resource in reversed(resources):
+                try:
+                    resource.close()
+                except Exception:
+                    pass
+            if isinstance(exc, RequestError):
+                raise
+            raise RequestError(HTTPStatus.BAD_REQUEST, "invalid multipart body") from exc
+
+        return ParsedMultipartForm(fields, file_fields, resources)
 
     def read_json_body(self) -> dict:
         if self.headers.get_content_type() != "application/json":
