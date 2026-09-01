@@ -1,8 +1,10 @@
+import errno
 import http.client
 import io
 import json
 import os
 import socket
+import tempfile
 import threading
 import unittest
 from http import HTTPStatus
@@ -278,6 +280,27 @@ class FileResponseFailureHttpTests(LiveServerTestCase):
         self.assertEqual(status, 400)
         self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
         self.assertFalse(json.loads(payload)["ok"])
+
+    def test_resolve_eloop_maps_to_400_without_remapping_other_oserrors(self):
+        class FailingPath:
+            def __init__(self, error_number):
+                self.error_number = error_number
+
+            def resolve(self, *, strict):
+                self.assert_strict = strict
+                raise OSError(self.error_number, "resolve failed")
+
+        handler = object.__new__(server.AppHandler)
+        cases = (
+            (errno.ELOOP, HTTPStatus.BAD_REQUEST),
+            (errno.EIO, HTTPStatus.INTERNAL_SERVER_ERROR),
+        )
+        for error_number, expected_status in cases:
+            path = FailingPath(error_number)
+            with self.subTest(error_number=error_number), self.assertRaises(server.RequestError) as caught:
+                handler.serve_file(path)
+            self.assertTrue(path.assert_strict)
+            self.assertEqual(caught.exception.status, expected_status)
 
 
 class IPv6ServerFactoryHttpTests(unittest.TestCase):
@@ -725,6 +748,78 @@ class MultipartHttpTests(LiveServerTestCase):
         self.assertEqual(caught.exception.status, HTTPStatus.BAD_REQUEST)
         self.assertTrue(exposed_resources)
         self.assertTrue(all(resource.closed for resource in exposed_resources))
+
+    def test_incomplete_current_file_part_closes_its_spooled_resource(self):
+        payload = b"x" * ((1024 * 1024) + 1)
+        body = build_multipart_body(
+            self.boundary,
+            [
+                {
+                    "name": "video",
+                    "filename": "incomplete.bin",
+                    "content_type": "application/octet-stream",
+                    "data": payload,
+                }
+            ],
+        )
+        closing_boundary = f"--{self.boundary}--\r\n".encode("ascii")
+        incomplete_body = body[: -len(closing_boundary)]
+        handler = self.parser_handler(incomplete_body)
+        opened_resources = []
+
+        def open_spool():
+            resource = tempfile.SpooledTemporaryFile(max_size=1024 * 1024, mode="w+b")
+            opened_resources.append(resource)
+            return resource
+
+        handler._open_multipart_spool = open_spool
+        with self.assertRaises(server.RequestError) as caught:
+            handler.read_multipart_form()
+
+        self.assertEqual(caught.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(len(opened_resources), 1, "the current file resource was not request-owned")
+        self.assertTrue(opened_resources[0].closed)
+
+    def test_parser_accepts_exact_aggregate_non_file_field_limit(self):
+        field_limit = 1024 * 1024
+        body = build_multipart_body(
+            self.boundary,
+            [
+                {"name": "first", "data": b"a" * (field_limit // 2)},
+                {"name": "second", "data": b"b" * (field_limit // 2)},
+            ],
+        )
+
+        with self.parser_handler(body).read_multipart_form() as form:
+            self.assertEqual(len(form.getfirst("first")), field_limit // 2)
+            self.assertEqual(len(form.getfirst("second")), field_limit // 2)
+
+    def test_multipart_route_rejects_aggregate_field_data_above_limit(self):
+        field_limit = 1024 * 1024
+        body = build_multipart_body(
+            self.boundary,
+            [
+                {"name": "first", "data": b"a" * (field_limit // 2)},
+                {"name": "second", "data": b"b" * ((field_limit // 2) + 1)},
+            ],
+        )
+
+        with mock.patch.object(
+            server,
+            "register_uploaded_media",
+            return_value={"upload_id": "must-not-run"},
+        ) as register:
+            status, response_headers, payload = self.request(
+                "POST",
+                "/api/upload",
+                body=body,
+                headers=self.multipart_headers(),
+            )
+
+        self.assertEqual(status, 413, payload)
+        self.assertEqual(response_headers.get("Content-Type"), "application/json; charset=utf-8")
+        self.assertFalse(json.loads(payload)["ok"])
+        register.assert_not_called()
 
     def test_multipart_routes_reject_invalid_framing_with_structured_statuses(self):
         self.assertTrue(

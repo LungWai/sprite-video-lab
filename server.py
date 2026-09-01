@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import colorsys
+import errno
 import importlib.util
 import ipaddress
 import json
@@ -30,7 +31,7 @@ from urllib.parse import urlparse, urlsplit
 from urllib.request import Request, urlopen
 
 from PIL import Image, ImageChops, ImageFilter
-from python_multipart import FormParser
+from python_multipart import MultipartParser
 from python_multipart.multipart import parse_options_header
 
 
@@ -70,6 +71,7 @@ MAX_JSON_BODY_BYTES = 1024 * 1024
 DEFAULT_MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024
 MULTIPART_READ_CHUNK_BYTES = 1024 * 1024
 MULTIPART_MEMORY_FILE_BYTES = 1024 * 1024
+MULTIPART_MAX_FIELD_BYTES = 1024 * 1024
 MULTIPART_MAX_PARTS = 4096
 MULTIPART_MAX_HEADER_COUNT = 8
 MULTIPART_MAX_HEADER_SIZE = 4096 + 128
@@ -6026,6 +6028,9 @@ class AppHandler(BaseHTTPRequestHandler):
 
         self.send_error(HTTPStatus.NOT_FOUND)
 
+    def _open_multipart_spool(self) -> BinaryIO:
+        return tempfile.SpooledTemporaryFile(max_size=MULTIPART_MEMORY_FILE_BYTES, mode="w+b")
+
     def read_multipart_form(self) -> ParsedMultipartForm:
         try:
             content_type, options = parse_options_header(self.headers.get("Content-Type"))
@@ -6048,9 +6053,18 @@ class AppHandler(BaseHTTPRequestHandler):
 
         fields: dict[str, list[str]] = {}
         file_fields: dict[str, list[UploadedFormFile]] = {}
-        resources = []
+        resources: list[BinaryIO] = []
         part_count = 0
+        field_bytes = 0
         parser_ended = False
+        headers: dict[bytes, bytes] = {}
+        header_name_parts: list[bytes] = []
+        header_value_parts: list[bytes] = []
+        current_name: bytes | None = None
+        current_filename: bytes | None = None
+        current_content_type = ""
+        current_field: bytearray | None = None
+        current_file: BinaryIO | None = None
 
         def decode_text(value: bytes | None) -> str:
             raw = value or b""
@@ -6059,49 +6073,133 @@ class AppHandler(BaseHTTPRequestHandler):
             except UnicodeDecodeError:
                 return raw.decode("latin-1")
 
-        def count_part() -> None:
-            nonlocal part_count
+        def on_part_begin() -> None:
+            nonlocal part_count, headers, current_name, current_filename
+            nonlocal current_content_type, current_field, current_file
             part_count += 1
             if part_count > MULTIPART_MAX_PARTS:
                 raise RequestError(HTTPStatus.BAD_REQUEST, "too many multipart parts")
+            headers = {}
+            header_name_parts.clear()
+            header_value_parts.clear()
+            current_name = None
+            current_filename = None
+            current_content_type = ""
+            current_field = None
+            current_file = None
 
-        def on_field(field) -> None:
-            count_part()
-            name = decode_text(field.field_name)
-            fields.setdefault(name, []).append(decode_text(field.value))
+        def on_header_begin() -> None:
+            header_name_parts.clear()
+            header_value_parts.clear()
 
-        def on_file(file) -> None:
-            resources.append(file)
-            count_part()
-            file.file_object.seek(0)
-            name = decode_text(file.field_name)
-            file_fields.setdefault(name, []).append(
-                UploadedFormFile(
-                    filename=decode_text(file.file_name),
-                    type=str(file.content_type or ""),
-                    file=file.file_object,
+        def on_header_field(data: bytes, start: int, end: int) -> None:
+            header_name_parts.append(data[start:end])
+
+        def on_header_value(data: bytes, start: int, end: int) -> None:
+            header_value_parts.append(data[start:end])
+
+        def on_header_end() -> None:
+            headers[b"".join(header_name_parts).lower()] = b"".join(header_value_parts)
+
+        def on_headers_finished() -> None:
+            nonlocal current_name, current_filename, current_content_type
+            nonlocal current_field, current_file
+            content_disposition = headers.get(b"content-disposition")
+            _disposition, options = parse_options_header(content_disposition)
+            current_name = options.get(b"name")
+            if current_name is None:
+                raise ValueError("multipart field name is required")
+            current_filename = options.get(b"filename")
+            content_type_bytes = headers.get(b"content-type", b"")
+            current_content_type = content_type_bytes.decode("latin-1")
+            if current_filename is None:
+                current_field = bytearray()
+                return
+
+            resource = self._open_multipart_spool()
+            try:
+                resources.append(resource)
+            except Exception:
+                resource.close()
+                raise
+            current_file = resource
+
+        def on_part_data(data: bytes, start: int, end: int) -> None:
+            nonlocal field_bytes
+            chunk = data[start:end]
+            if current_file is not None:
+                if current_file.write(chunk) != len(chunk):
+                    raise OSError("incomplete multipart file write")
+                return
+            if current_field is None:
+                raise ValueError("multipart part has no storage")
+            if len(chunk) > MULTIPART_MAX_FIELD_BYTES - field_bytes:
+                raise RequestError(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    "multipart field data is too large",
                 )
-            )
+            field_bytes += len(chunk)
+            current_field.extend(chunk)
+
+        def on_part_end() -> None:
+            nonlocal current_name, current_filename, current_content_type
+            nonlocal current_field, current_file
+            if current_name is None:
+                raise ValueError("multipart field name is required")
+            name = decode_text(current_name)
+            if current_file is not None:
+                current_file.seek(0)
+                file_fields.setdefault(name, []).append(
+                    UploadedFormFile(
+                        filename=decode_text(current_filename),
+                        type=current_content_type,
+                        file=current_file,
+                    )
+                )
+                current_file = None
+            elif current_field is not None:
+                fields.setdefault(name, []).append(decode_text(bytes(current_field)))
+                current_field = None
+            else:
+                raise ValueError("multipart part has no storage")
+            current_name = None
+            current_filename = None
+            current_content_type = ""
 
         def on_end() -> None:
             nonlocal parser_ended
             parser_ended = True
 
+        parser = None
+        callback_names = (
+            "part_begin",
+            "part_data",
+            "part_end",
+            "header_begin",
+            "header_field",
+            "header_value",
+            "header_end",
+            "headers_finished",
+            "end",
+        )
         try:
-            parser = FormParser(
-                "multipart/form-data",
-                on_field,
-                on_file,
-                on_end=on_end,
-                boundary=boundary,
-                config={
-                    "MAX_BODY_SIZE": maximum,
-                    "MAX_MEMORY_FILE_SIZE": MULTIPART_MEMORY_FILE_BYTES,
-                    "MAX_HEADER_COUNT": MULTIPART_MAX_HEADER_COUNT,
-                    "MAX_HEADER_SIZE": MULTIPART_MAX_HEADER_SIZE,
+            parser = MultipartParser(
+                boundary,
+                callbacks={
+                    "on_part_begin": on_part_begin,
+                    "on_part_data": on_part_data,
+                    "on_part_end": on_part_end,
+                    "on_header_begin": on_header_begin,
+                    "on_header_field": on_header_field,
+                    "on_header_value": on_header_value,
+                    "on_header_end": on_header_end,
+                    "on_headers_finished": on_headers_finished,
+                    "on_end": on_end,
                 },
+                max_size=maximum,
+                max_header_count=MULTIPART_MAX_HEADER_COUNT,
+                max_header_size=MULTIPART_MAX_HEADER_SIZE,
             )
-            resources.append(parser)
             remaining = length
             while remaining:
                 chunk = self.rfile.read(min(MULTIPART_READ_CHUNK_BYTES, remaining))
@@ -6122,6 +6220,14 @@ class AppHandler(BaseHTTPRequestHandler):
             if isinstance(exc, RequestError):
                 raise
             raise RequestError(HTTPStatus.BAD_REQUEST, "invalid multipart body") from exc
+        finally:
+            if parser is not None:
+                try:
+                    parser.close()
+                except Exception:
+                    pass
+                for callback_name in callback_names:
+                    parser.set_callback(callback_name, None)
 
         return ParsedMultipartForm(fields, file_fields, resources)
 
@@ -6189,6 +6295,8 @@ class AppHandler(BaseHTTPRequestHandler):
         except RuntimeError as exc:
             raise RequestError(HTTPStatus.BAD_REQUEST, "invalid file path") from exc
         except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise RequestError(HTTPStatus.BAD_REQUEST, "invalid file path") from exc
             raise RequestError(HTTPStatus.INTERNAL_SERVER_ERROR, "unable to read file") from exc
 
         if not stat.S_ISREG(file_stat.st_mode):
