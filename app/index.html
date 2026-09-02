@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sprite Video Lab</title>
+  <link rel="icon" type="image/png" href="/favicon.ico">
   <link rel="stylesheet" href="/app/styles.css">
 </head>
 <body>
@@ -49,7 +50,7 @@
 
     <div class="workspace">
       <aside class="workflow-rail" aria-label="工作流">
-        <a href="#importSection" class="rail-item active">
+        <a href="#importSection" class="rail-item active" aria-current="step">
           <span class="rail-index">01</span>
           <span>导入</span>
         </a>
@@ -105,7 +106,7 @@
                 <span class="upload-dropzone-hint">多图会按文件名顺序组成帧序列</span>
                 <span class="upload-dropzone-types">MP4 / MOV / MKV / WebM / GIF / PNG / JPG / WebP / BMP</span>
               </label>
-              <input id="uploadInput" type="file" accept=".mp4,.mov,.mkv,.webm,.gif,.png,.jpg,.jpeg,.webp,.bmp,video/*,image/*" multiple>
+              <input id="uploadInput" class="visually-hidden-input" type="file" accept=".mp4,.mov,.mkv,.webm,.gif,.png,.jpg,.jpeg,.webp,.bmp,video/*,image/*" multiple>
             </div>
           </div>
         </section>

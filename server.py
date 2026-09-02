@@ -5765,6 +5765,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/output-path":
             self.send_json({"ok": True, "output_path": output_path_payload()})
             return
+        if parsed.path == "/favicon.ico":
+            self.serve_file(ROOT_DIR / "sprite_video_lab_icon.png", content_type="image/png", cache_control="public, max-age=86400")
+            return
         if parsed.path == "/":
             self.serve_app_file(APP_DIR / "index.html", content_type="text/html; charset=utf-8")
             return

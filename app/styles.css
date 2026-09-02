@@ -167,7 +167,7 @@ h1 {
 
 h2 {
   margin: 0;
-  font-size: clamp(28px, 3.6vw, 52px);
+  font-size: 34px;
   line-height: 1.2;
   font-weight: 900;
 }
@@ -493,6 +493,18 @@ button:focus-visible,
 
 .upload-dropzone-types {
   font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+.visually-hidden-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .preview-layout {
@@ -2323,6 +2335,10 @@ button:focus-visible,
 }
 
 @media (max-width: 1180px) {
+  h2 {
+    font-size: 30px;
+  }
+
   .topbar {
     grid-template-columns: 1fr;
     height: auto;
@@ -2357,7 +2373,12 @@ button:focus-visible,
     font-size: 14px;
   }
 
+  h2 {
+    font-size: 26px;
+  }
+
   .topbar {
+    position: static;
     padding: 12px;
   }
 
@@ -2505,7 +2526,39 @@ button:focus-visible,
   }
 
   .source-strip {
-    grid-template-columns: 1fr;
+    display: flex;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+  }
+
+  .source-strip > div {
+    flex: 0 0 132px;
+  }
+
+  .primary-button,
+  .magic-button,
+  .ghost-button,
+  .icon-button,
+  .choice-button,
+  .compact-button,
+  .text-button,
+  .small-link,
+  input[type="text"],
+  input[type="number"],
+  select,
+  .checkbox-row,
+  .magic-realesrgan-option,
+  .magic-resize-option {
+    min-height: 44px;
+  }
+
+  .icon-button,
+  .clear-runtime-button {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
   }
 }
 

@@ -161,7 +161,39 @@ document.addEventListener("DOMContentLoaded", () => {
   lastAcceptedMatteMode = els.matteModeInput.value || "chroma";
   startHotReloadPolling();
   window.addEventListener("beforeunload", persistSession);
+  window.addEventListener("scroll", scheduleWorkflowRailSync, { passive: true });
+  window.addEventListener("resize", scheduleWorkflowRailSync);
+  scheduleWorkflowRailSync();
 });
+
+let workflowRailFrame = null;
+
+function syncWorkflowRail() {
+  const items = Array.from(document.querySelectorAll(".rail-item"));
+  const candidates = items
+    .map((item) => ({ item, section: document.querySelector(item.getAttribute("href")) }))
+    .filter(({ section }) => section && !section.hidden && section.offsetParent !== null);
+  if (!candidates.length) return;
+  const marker = window.scrollY + Math.min(window.innerHeight * 0.3, 180);
+  const active = candidates.reduce((selected, candidate) => {
+    const top = candidate.section.getBoundingClientRect().top + window.scrollY;
+    return top <= marker ? candidate : selected;
+  }, candidates[0]);
+  items.forEach((item) => {
+    const isActive = item === active.item;
+    item.classList.toggle("active", isActive);
+    if (isActive) item.setAttribute("aria-current", "step");
+    else item.removeAttribute("aria-current");
+  });
+}
+
+function scheduleWorkflowRailSync() {
+  if (workflowRailFrame !== null) return;
+  workflowRailFrame = window.requestAnimationFrame(() => {
+    workflowRailFrame = null;
+    syncWorkflowRail();
+  });
+}
 
 function bindElements() {
   [
@@ -2168,6 +2200,7 @@ function showAnimationWorkbench() {
     syncAnimationPreview(false);
   }
   syncResultActions();
+  scheduleWorkflowRailSync();
 }
 
 function syncResultActions() {
@@ -2248,6 +2281,7 @@ function applyUpload(upload) {
   renderSegmentControls();
   updateSegmentConfirmationUI();
   persistSession();
+  scheduleWorkflowRailSync();
 }
 
 function resetProcessPreview() {
@@ -2824,6 +2858,7 @@ function renderJob() {
   renderFrames();
   syncResultActions();
   persistSession();
+  scheduleWorkflowRailSync();
 }
 
 function renderFrames() {

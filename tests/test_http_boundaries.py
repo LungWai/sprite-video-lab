@@ -205,6 +205,29 @@ class MediaRangeHttpTests(LiveServerTestCase):
         self.assertEqual(body, self.media_bytes)
 
 
+class FaviconHttpTests(LiveServerTestCase):
+    """The product icon is served at /favicon.ico as a cacheable, non-ranged PNG."""
+
+    icon_path = server.ROOT_DIR / "sprite_video_lab_icon.png"
+
+    def test_favicon_serves_the_product_icon_png_with_day_cache(self):
+        status, headers, body = self.request("GET", "/favicon.ico")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "image/png")
+        self.assertEqual(headers["Cache-Control"], "public, max-age=86400")
+        self.assertEqual(headers["Content-Length"], str(self.icon_path.stat().st_size))
+        self.assertEqual(body, self.icon_path.read_bytes())
+
+    def test_favicon_ignores_range_requests(self):
+        status, headers, body = self.request("GET", "/favicon.ico", headers={"Range": "bytes=0-15"})
+
+        self.assertEqual(status, 200)
+        self.assertNotIn("Content-Range", headers)
+        self.assertNotIn("Accept-Ranges", headers)
+        self.assertEqual(body, self.icon_path.read_bytes())
+
+
 class FileResponseFailureHttpTests(LiveServerTestCase):
     def setUp(self):
         super().setUp()
