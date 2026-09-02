@@ -246,6 +246,29 @@ class RealEsrganIntegrityTests(unittest.TestCase):
 
             self.assertFalse(destination.exists())
 
+    def test_checksum_mismatch_install_preserves_preexisting_target(self):
+        payload = b"archive bytes that do not match the pinned digest"
+        sentinel_bytes = b"pre-existing installation\x00\xff"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir) / "work"
+            target_dir = work_dir / "tools" / "realesrgan-ncnn-vulkan"
+            target_dir.mkdir(parents=True)
+            sentinel = target_dir / "sentinel.bin"
+            sentinel.write_bytes(sentinel_bytes)
+            before = self.snapshot_tree(target_dir)
+            wrong_sha256 = hashlib.sha256(b"a different archive").hexdigest()
+
+            with self.invalid_archive_install_context(work_dir, payload):
+                with (
+                    mock.patch.object(server, "REAL_ESRGAN_WINDOWS_PACKAGE_SHA256", wrong_sha256),
+                    self.assertRaisesRegex(RuntimeError, "checksum"),
+                ):
+                    server.install_realesrgan_runtime(True)
+
+            self.assertEqual(self.snapshot_tree(target_dir), before)
+            self.assertEqual(sentinel.read_bytes(), sentinel_bytes)
+            self.assertEqual([path.name for path in (work_dir / "tools").iterdir()], ["realesrgan-ncnn-vulkan"])
+
     def test_invalid_archive_install_leaves_fresh_target_absent(self):
         payload = b"not a ZIP archive"
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -277,10 +300,9 @@ class RealEsrganIntegrityTests(unittest.TestCase):
             self.assertEqual(self.snapshot_tree(target_dir), before)
             self.assertEqual(sentinel.read_bytes(), sentinel_bytes)
 
-    def copy_verified_download(self, response, destination, expected_sha256, max_bytes):
-        copy_download = getattr(server, "copy_verified_download", None)
-        self.assertIsNotNone(copy_download, "copy_verified_download is missing")
-        return copy_download(response, destination, expected_sha256, max_bytes)
+    @staticmethod
+    def copy_verified_download(response, destination, expected_sha256, max_bytes):
+        return server.copy_verified_download(response, destination, expected_sha256, max_bytes)
 
     @staticmethod
     @contextmanager

@@ -40,6 +40,9 @@ TOUCH_TARGET_SELECTORS = (
     ".checkbox-row",
     ".magic-realesrgan-option",
     ".magic-resize-option",
+    ".preview-options select",
+    ".preprocess-smoothing-option",
+    ".ai-live-preview-option",
 )
 
 VIEWPORT_UNIT_PATTERN = re.compile(r"\d(?:vw|vh|vmin|vmax)\b", re.IGNORECASE)
@@ -259,6 +262,8 @@ class UploadInputContractTests(unittest.TestCase):
         self.assertEqual(attrs.get("type"), "file")
         self.assertIn("multiple", attrs)
         self.assertIn("visually-hidden-input", classes_of(attrs))
+        # The labelled dropzone is the keyboard stop; the clipped input must not be a second, invisible one.
+        self.assertEqual(attrs.get("tabindex"), "-1")
         self.assertEqual(
             attrs.get("accept"),
             ".mp4,.mov,.mkv,.webm,.gif,.png,.jpg,.jpeg,.webp,.bmp,video/*,image/*",

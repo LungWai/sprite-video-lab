@@ -256,7 +256,9 @@ def origin_matches_request(origin: str, request_host: str) -> bool:
             return False
         origin_host, origin_port = _parse_authority(parsed.netloc)
         host, port = _parse_authority(request_host)
-        return (origin_host, origin_port or 80) == (host, port or 80)
+        origin_port = 80 if origin_port is None else origin_port
+        port = 80 if port is None else port
+        return (origin_host, origin_port) == (host, port)
     except (ValueError, TypeError):
         return False
 
@@ -4377,7 +4379,7 @@ def copy_verified_download(response: BinaryIO, destination: Path, expected_sha25
         if not hmac.compare_digest(digest.hexdigest(), expected_sha256):
             raise RuntimeError("download checksum mismatch")
         return written
-    except Exception:
+    except BaseException:
         destination.unlink(missing_ok=True)
         raise
 

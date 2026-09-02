@@ -153,7 +153,7 @@ def resolve_powershell_string(expression: str, lines: list[str]) -> str:
     assignments = [
         match.group(1)
         for line in lines
-        for match in [re.match(rf'^\s*\${var.group(1)}\s*=\s*"([^"]*)"\s*$', line)]
+        for match in [re.match(rf'^\s*\${re.escape(var.group(1))}\s*=\s*"([^"]*)"\s*$', line)]
         if match
     ]
     if len(assignments) != 1:

@@ -108,6 +108,7 @@ class RequestBoundaryHelperTests(unittest.TestCase):
         self.assertTrue(server.origin_matches_request("http://LOCALHOST.:80", "localhost"))
         self.assertTrue(server.origin_matches_request("http://[0:0:0:0:0:0:0:1]:8894", "[::1]:8894"))
         self.assertFalse(server.origin_matches_request("http://localhost:", "localhost"))
+        self.assertFalse(server.origin_matches_request("http://localhost:0", "localhost"))
         for origin in (
             "null",
             "not-an-origin",
