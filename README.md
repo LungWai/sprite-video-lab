@@ -215,7 +215,7 @@ start_sprite_video_lab_portable.bat
 | `SPRITE_VIDEO_LAB_HOST` | 服务地址，默认 `127.0.0.1` |
 | `SPRITE_VIDEO_LAB_PORT` | 服务端口，默认 `8894` |
 | `SPRITE_VIDEO_LAB_ALLOWED_HOSTS` | 额外允许的请求主机名或 IP，多个值以逗号分隔；默认回环地址无需配置 |
-| `SPRITE_VIDEO_LAB_MAX_UPLOAD_BYTES` | 上传请求体字节上限，必须为正整数，默认 2 GiB |
+| `SPRITE_VIDEO_LAB_MAX_UPLOAD_BYTES` | 上传请求体字节上限，必须为正整数，默认 8 GiB |
 | `SPRITE_VIDEO_LAB_WORK_DIR` | 上传、任务、缓存和导出等运行时文件目录 |
 | `SPRITE_VIDEO_LAB_FFMPEG_DIR` | 包含 `ffmpeg.exe` 和 `ffprobe.exe` 的目录 |
 | `SPRITE_VIDEO_LAB_FFMPEG_ACCEL` | ffmpeg 加速方式：`auto`、`cpu`、`cuda`、`qsv`、`d3d11va`、`dxva2` |

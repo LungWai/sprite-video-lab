@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased - 2026-09-02
+
+### Fixes
+- Restore multipart uploads on Python 3.13+ by replacing the removed `cgi` module with a shared `python-multipart` adapter for `/api/upload`, `/api/import-animation`, and `/api/line-cleaner-process`, with spooled temporary files that are always closed.
+- Project `production_id`, `scene_id`, `shot_id`, and `shot_version_id` from `/api/process` into the returned and persisted job manifest.
+- Serve exactly one HTTP byte range with correct suffix, open-ended, clamped, and unsatisfiable (`416`) handling, and ignore malformed or multiple ranges instead of crashing.
+- Resolve the configured export root before runtime cleanup so macOS `/var` symlinks no longer skip generated `*-export`, `*-magic-*-frames`, and `*-scale-*` directories, while unrelated files, symlinks, and settings are never removed.
+- Copy the Windows portable Python runtime into `runtime\python` and validate the bundle contract (`python.exe`, `ffmpeg.exe`, `ffprobe.exe`, `server.py`, launcher, `PIL`, `python_multipart`) before creating the archive.
+- Replace the fixed two-second launcher delay with bounded polling of `/api/app-version`; the browser opens only after the server responds and the launcher exits non-zero with a clear message on timeout.
+- Fix the responsive UI: accessible visually-hidden upload input, non-sticky mobile top bar, horizontally scrollable source metadata, 44px mobile touch targets, fixed breakpoint typography, no horizontal overflow at 320px and 390px, workflow rail state driven by the visible section, and `/favicon.ico` served from the product icon.
+- Repair the baseline test suite so it passes without optional AI packages installed.
+
+### Security
+- Validate the request `Host` header before routing (loopback names, the bound address, and `SPRITE_VIDEO_LAB_ALLOWED_HOSTS`; `421` otherwise) and require a browser `Origin`, when present, to exactly match the request host and port (`403` otherwise).
+- Send `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `Cross-Origin-Resource-Policy: same-origin` on every response, and `Cache-Control: no-store` on JSON responses.
+- Bound request bodies: JSON bodies are limited to 1 MiB and must be UTF-8 JSON objects, multipart bodies require a valid `Content-Length` (`411` otherwise) and honour `SPRITE_VIDEO_LAB_MAX_UPLOAD_BYTES` (`413` above the limit), with part, header, and field-size caps.
+- Validate upload, job, preview, line-cleaner, and scale identifiers as single safe path components before any filesystem join, and restrict `/api/open-path` to existing directories inside the managed work root or configured export root.
+- Verify the Real-ESRGAN Windows download against a pinned SHA-256 while streaming, enforce a 64 MiB size cap, and delete the temporary artifact without touching the installation target on mismatch.
+
 ## Unreleased - 2026-08-21
 
 ### Features
