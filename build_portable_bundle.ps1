@@ -50,6 +50,30 @@ function Copy-Tree {
     Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
 }
 
+function Copy-TreeContents {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    Ensure-Directory -PathValue $Destination
+    Get-ChildItem -LiteralPath $Source -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $Destination -Recurse -Force
+    }
+}
+
+function Assert-RequiredPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathValue,
+        [Parameter(Mandatory = $true)]
+        [string]$Description
+    )
+
+    if (-not (Test-Path -LiteralPath $PathValue -PathType Leaf)) {
+        throw "Bundle validation failed: $Description not found at $PathValue"
+    }
+}
+
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-ExistingPath -PathValue $repoRoot
 $outputRootResolved = $OutputRoot
@@ -88,6 +112,7 @@ $projectFiles = @(
     "app",
     "server.py",
     "start_sprite_video_lab_portable.bat",
+    "wait_for_server.ps1",
     "README.md",
     "AI_MATTING.md",
     "LICENSE",
@@ -102,7 +127,7 @@ foreach ($item in $projectFiles) {
 }
 
 Write-Host "Copying Python runtime..."
-Copy-Tree -Source $pythonHomeResolved -Destination $runtimeRoot
+Copy-TreeContents -Source $pythonHomeResolved -Destination $pythonRuntimeRoot
 
 $sitePackagesSource = Join-Path $venvRootResolved "Lib\site-packages"
 $sitePackagesDest = Join-Path $pythonRuntimeRoot "Lib\site-packages"
@@ -153,6 +178,21 @@ Notes:
 - If Windows Defender prompts on first run, allow the local Python process.
 "@
 [System.IO.File]::WriteAllText($readmePath, $readmeText, (New-Utf8NoBomEncoding))
+
+Write-Host "Validating bundle layout..."
+$bundledPython = Join-Path $pythonRuntimeRoot "python.exe"
+Assert-RequiredPath -PathValue $bundledPython -Description "bundled Python runtime"
+Assert-RequiredPath -PathValue (Join-Path $ffmpegRuntimeRoot "ffmpeg.exe") -Description "bundled ffmpeg"
+Assert-RequiredPath -PathValue (Join-Path $ffmpegRuntimeRoot "ffprobe.exe") -Description "bundled ffprobe"
+Assert-RequiredPath -PathValue (Join-Path $bundleRoot "server.py") -Description "server.py"
+Assert-RequiredPath -PathValue (Join-Path $bundleRoot "start_sprite_video_lab_portable.bat") -Description "portable launcher"
+Assert-RequiredPath -PathValue (Join-Path $bundleRoot "wait_for_server.ps1") -Description "readiness probe"
+
+Write-Host "Validating bundled Python imports..."
+& (Join-Path $pythonRuntimeRoot "python.exe") -c "import PIL, python_multipart"
+if ($LASTEXITCODE -ne 0) {
+    throw "Bundled Python cannot import PIL and python_multipart."
+}
 
 $zipPath = Join-Path $outputRootResolved "SpriteVideoLab-portable.zip"
 if (Test-Path -LiteralPath $zipPath) {

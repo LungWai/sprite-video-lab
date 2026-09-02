@@ -42,5 +42,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -match $escaped } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} }"
 
 start "Sprite Video Lab Server" "%PYTHON_EXE%" "%~dp0server.py" --serve --host "%SPRITE_VIDEO_LAB_HOST%" --port "%SPRITE_VIDEO_LAB_PORT%"
-timeout /t 2 >nul
-start "" http://%SPRITE_VIDEO_LAB_HOST%:%SPRITE_VIDEO_LAB_PORT%
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wait_for_server.ps1" -HostName "%SPRITE_VIDEO_LAB_HOST%" -Port "%SPRITE_VIDEO_LAB_PORT%" -TimeoutSeconds 30 -OpenBrowser
+if errorlevel 1 (
+  echo Sprite Video Lab failed to start. Check the server window for details.
+  exit /b 1
+)

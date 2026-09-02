@@ -46,5 +46,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | ForEach-Object { $ownerPid = $_.OwningProcess; $proc = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -eq $ownerPid }; if ($proc.CommandLine -and $proc.CommandLine -match 'server\.py' -and ($proc.CommandLine -match 'sprite-video-lab' -or $proc.CommandLine -match 'SVL')) { try { Stop-Process -Id $ownerPid -Force -ErrorAction Stop } catch {} } }"
 
 start "Sprite Video Lab Server" "%PYTHON_EXE%" "%~dp0server.py" --serve --host "%SPRITE_VIDEO_LAB_HOST%" --port "%SPRITE_VIDEO_LAB_PORT%"
-timeout /t 2 >nul
-start "" http://%SPRITE_VIDEO_LAB_HOST%:%SPRITE_VIDEO_LAB_PORT%
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wait_for_server.ps1" -HostName "%SPRITE_VIDEO_LAB_HOST%" -Port "%SPRITE_VIDEO_LAB_PORT%" -TimeoutSeconds 30 -OpenBrowser
+if errorlevel 1 (
+  echo Sprite Video Lab failed to start. Check the server window for details.
+  exit /b 1
+)
