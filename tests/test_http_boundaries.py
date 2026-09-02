@@ -169,6 +169,69 @@ class MediaRangeHttpTests(LiveServerTestCase):
         self.assertEqual(headers["Content-Length"], "16")
         self.assertEqual(body, bytes(range(84, 100)))
 
+    def test_large_ranges_stream_exact_bytes_in_bounded_reads(self):
+        chunk_limit = 1024 * 1024
+        large_size = (3 * chunk_limit) + 17
+        large_bytes = bytes(index % 251 for index in range(large_size))
+        upload = server.upload_dir("large-range-fixture")
+        upload.mkdir(parents=True)
+        large_path = upload / "large.mp4"
+        large_path.write_bytes(large_bytes)
+        (upload / "manifest.json").write_text(
+            json.dumps({"source_path": str(large_path), "media_type": "video"}),
+            encoding="utf-8",
+        )
+        target = large_path.resolve()
+        read_sizes = []
+        original_open = Path.open
+
+        class RecordingHandle:
+            def __init__(self, handle):
+                self._handle = handle
+
+            def read(self, size=-1):
+                read_sizes.append(size)
+                return self._handle.read(size)
+
+            def __enter__(self):
+                self._handle.__enter__()
+                return self
+
+            def __exit__(self, *exc_info):
+                return self._handle.__exit__(*exc_info)
+
+            def __getattr__(self, name):
+                return getattr(self._handle, name)
+
+        def recording_open(path, *args, **kwargs):
+            handle = original_open(path, *args, **kwargs)
+            if path == target and (args[:1] == ("rb",) or kwargs.get("mode") == "rb"):
+                return RecordingHandle(handle)
+            return handle
+
+        cases = (
+            ("bytes=0-", 0, large_size - 1),
+            (f"bytes={chunk_limit + 5}-{(2 * chunk_limit) + 40}", chunk_limit + 5, (2 * chunk_limit) + 40),
+        )
+        for header, start, end in cases:
+            with self.subTest(range=header):
+                read_sizes.clear()
+                with mock.patch.object(Path, "open", recording_open):
+                    status, headers, body = self.request(
+                        "GET",
+                        "/media/upload/large-range-fixture",
+                        headers={"Range": header},
+                    )
+
+                expected = large_bytes[start:end + 1]
+                self.assertEqual(status, 206)
+                self.assertEqual(headers["Content-Range"], f"bytes {start}-{end}/{large_size}")
+                self.assertEqual(headers["Content-Length"], str(len(expected)))
+                self.assertEqual(len(body), len(expected))
+                self.assertEqual(body, expected)
+                self.assertTrue(read_sizes, "media handle reads were not observed")
+                self.assertLessEqual(max(read_sizes), chunk_limit, read_sizes)
+
     def test_huge_start_returns_empty_416_response(self):
         status, headers, body = self.request(
             "GET",
@@ -725,7 +788,8 @@ class MultipartHttpTests(LiveServerTestCase):
             self.assertEqual(upload.filename, "large.bin")
             self.assertEqual(upload.type, "application/octet-stream")
             self.assertEqual(resource.tell(), 0)
-            self.assertNotIsInstance(resource, io.BytesIO)
+            self.assertTrue(resource._rolled, "spool did not roll to disk after exceeding 1 MiB")
+            self.assertNotIsInstance(resource._file, io.BytesIO)
             self.assertEqual(resource.read(), large_payload)
             self.assertEqual(stream.read_sizes, [1024 * 1024, len(body) - (1024 * 1024)])
 
@@ -898,6 +962,50 @@ class MultipartHttpTests(LiveServerTestCase):
         self.assertEqual(status, 413, payload)
         self.assertFalse(json.loads(payload)["ok"])
         register.assert_not_called()
+
+    def test_parser_accepts_multipart_media_type_case_insensitively(self):
+        body = build_multipart_body(self.boundary, [{"name": "mode", "data": b"first"}])
+        handler = self.parser_handler(body, content_type=f"Multipart/Form-Data; boundary={self.boundary}")
+
+        with handler.read_multipart_form() as form:
+            self.assertEqual(form.getfirst("mode"), "first")
+
+    def test_parsed_form_close_closes_every_resource_even_when_one_raises(self):
+        first = mock.Mock()
+        failing = mock.Mock()
+        failing.close.side_effect = OSError("close failed")
+        last = mock.Mock()
+
+        server.ParsedMultipartForm({}, {}, [first, failing, last]).close()
+
+        first.close.assert_called_once()
+        failing.close.assert_called_once()
+        last.close.assert_called_once()
+
+    def test_multipart_route_accepts_exactly_4096_parts(self):
+        body = build_multipart_body(
+            self.boundary,
+            [
+                *({"name": "field", "data": b"x"} for _ in range(4095)),
+                {"name": "video", "filename": "clip.mp4", "data": b"video"},
+            ],
+        )
+
+        with mock.patch.object(
+            server,
+            "register_uploaded_media",
+            return_value={"upload_id": "upload-4096"},
+        ) as register:
+            status, _, payload = self.request(
+                "POST",
+                "/api/upload",
+                body=body,
+                headers=self.multipart_headers(),
+            )
+
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(json.loads(payload)["upload"]["upload_id"], "upload-4096")
+        register.assert_called_once()
 
     def test_multipart_route_rejects_more_than_4096_parts(self):
         body = build_multipart_body(

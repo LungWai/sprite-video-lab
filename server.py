@@ -75,6 +75,7 @@ MULTIPART_READ_CHUNK_BYTES = 1024 * 1024
 MULTIPART_MEMORY_FILE_BYTES = 1024 * 1024
 MULTIPART_MAX_FIELD_BYTES = 1024 * 1024
 MULTIPART_MAX_PARTS = 4096
+MEDIA_RANGE_CHUNK_BYTES = 1024 * 1024
 MULTIPART_MAX_HEADER_COUNT = 8
 MULTIPART_MAX_HEADER_SIZE = 4096 + 128
 ALLOWED_HOSTS_ENV = "SPRITE_VIDEO_LAB_ALLOWED_HOSTS"
@@ -125,7 +126,10 @@ class ParsedMultipartForm:
 
     def close(self) -> None:
         for resource in reversed(self._resources):
-            resource.close()
+            try:
+                resource.close()
+            except Exception:
+                pass
 
     def __enter__(self):
         return self
@@ -484,8 +488,17 @@ def clear_managed_runtime_files(confirmed: bool) -> dict:
         for child in export_root.iterdir():
             if not GENERATED_EXPORT_DIR_PATTERN.fullmatch(child.name):
                 continue
+            if child.is_symlink():
+                # Never follow links, even ones that resolve inside the export
+                # root: only real generated directories may be removed.
+                raise ValueError(f"拒绝清理输出目录中的符号链接：{child}")
             target = child.resolve()
-            if target.parent != export_root or not target.is_dir():
+            if (
+                target.parent != export_root
+                or target.name != child.name
+                or not GENERATED_EXPORT_DIR_PATTERN.fullmatch(target.name)
+                or not target.is_dir()
+            ):
                 raise ValueError(f"拒绝清理输出目录之外的路径：{target}")
             export_targets.append(target)
 
@@ -6079,7 +6092,7 @@ class AppHandler(BaseHTTPRequestHandler):
             content_type, options = parse_options_header(self.headers.get("Content-Type"))
         except (UnicodeError, ValueError) as exc:
             raise RequestError(HTTPStatus.BAD_REQUEST, "invalid multipart Content-Type") from exc
-        if content_type != b"multipart/form-data":
+        if content_type.lower() != b"multipart/form-data":
             raise RequestError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "multipart/form-data is required")
         boundary = options.get(b"boundary")
         if not boundary:
@@ -6373,7 +6386,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(length))
                 self.end_headers()
                 handle.seek(byte_range.start)
-                self.wfile.write(handle.read(length))
+                remaining = length
+                while remaining > 0:
+                    chunk = handle.read(min(MEDIA_RANGE_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
                 return
 
             self.send_response(HTTPStatus.OK)

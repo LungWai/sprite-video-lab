@@ -120,6 +120,40 @@ class RuntimeSafetyTests(unittest.TestCase):
             self.assertTrue(outside.is_dir())
             self.assertTrue(escape.is_symlink())
 
+    def test_cleanup_never_follows_generated_looking_export_symlink_inside_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            work_dir = root / "work"
+            managed_dirs = tuple(work_dir / name for name in ("uploads", "jobs", "exports", "previews", "line-cleaner", "magic"))
+            for directory in managed_dirs:
+                directory.mkdir(parents=True)
+            external_export_root = root / "external-exports"
+            external_export_root.mkdir()
+            precious = external_export_root / "my-precious"
+            precious.mkdir()
+            precious_file = precious / "keep.mov"
+            precious_file.write_bytes(b"irreplaceable")
+            link = external_export_root / "20260902-120000-abcd-export"
+            try:
+                link.symlink_to(precious, target_is_directory=True)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+
+            with (
+                mock.patch.object(server, "WORK_DIR", work_dir),
+                mock.patch.object(server, "EXPORTS_DIR", managed_dirs[2]),
+                mock.patch.object(server, "MANAGED_RUNTIME_DIRS", managed_dirs),
+                mock.patch.object(server, "configured_exports_dir", return_value=self.lexical_alias(external_export_root)),
+                mock.patch.object(server.shutil, "rmtree", wraps=server.shutil.rmtree) as rmtree,
+            ):
+                with self.assertRaises(ValueError):
+                    server.clear_managed_runtime_files(True)
+
+            rmtree.assert_not_called()
+            self.assertTrue(precious.is_dir())
+            self.assertEqual(precious_file.read_bytes(), b"irreplaceable")
+            self.assertTrue(link.is_symlink())
+
     def test_openable_directory_is_limited_to_work_and_configured_export_roots(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
