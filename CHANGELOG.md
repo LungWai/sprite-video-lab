@@ -7,8 +7,8 @@
 - Project `production_id`, `scene_id`, `shot_id`, and `shot_version_id` from `/api/process` into the returned and persisted job manifest.
 - Serve exactly one HTTP byte range with correct suffix, open-ended, clamped, and unsatisfiable (`416`) handling, and ignore malformed or multiple ranges instead of crashing.
 - Resolve the configured export root before runtime cleanup so macOS `/var` symlinks no longer skip generated `*-export`, `*-magic-*-frames`, and `*-scale-*` directories, while unrelated files, symlinks, and settings are never removed.
-- Copy the Windows portable Python runtime into `runtime\python` and validate the bundle contract (`python.exe`, `ffmpeg.exe`, `ffprobe.exe`, `server.py`, launcher, `PIL`, `python_multipart`) before creating the archive.
-- Replace the fixed two-second launcher delay with bounded polling of `/api/app-version`; the browser opens only after the server responds and the launcher exits non-zero with a clear message on timeout.
+- Copy the Windows portable Python runtime into `runtime\python` and validate the bundle contract (`python.exe`, `ffmpeg.exe`, `ffprobe.exe`, `server.py`, launcher, `PIL`, `python_multipart`) before creating the archive (verified by static contract tests; Windows run pending).
+- Replace the fixed two-second launcher delay with bounded polling of `/api/app-version`; the browser opens only after the server responds and the launcher exits non-zero with a clear message on timeout (verified by static contract tests; Windows run pending).
 - Fix the responsive UI: accessible visually-hidden upload input, non-sticky mobile top bar, horizontally scrollable source metadata, 44px mobile touch targets, fixed breakpoint typography, no horizontal overflow at 320px and 390px, workflow rail state driven by the visible section, and `/favicon.ico` served from the product icon.
 - Repair the baseline test suite so it passes without optional AI packages installed.
 

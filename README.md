@@ -172,6 +172,8 @@ $env:SPRITE_VIDEO_LAB_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
 .\start_sprite_video_lab.bat
 ```
 
+启动器依赖同目录下的 `wait_for_server.ps1` 等待服务就绪后再打开浏览器，请勿单独移动 `.bat` 文件。
+
 也可以直接运行：
 
 ```powershell
@@ -208,6 +210,8 @@ setup_ai_runtime.bat
 start_sprite_video_lab_portable.bat
 ```
 
+便携版启动器同样需要 `wait_for_server.ps1` 位于同一目录。
+
 ## 环境变量
 
 | 变量 | 用途 |
@@ -239,6 +243,7 @@ requirements-ai.txt                 可选 AI 依赖
 start_sprite_video_lab.bat           Windows 普通启动器
 start_sprite_video_lab_portable.bat  Windows 便携版启动器
 setup_ai_runtime.bat                 可选 AI 环境安装脚本
+wait_for_server.ps1                  启动器使用的服务就绪探测脚本
 build_portable_bundle.ps1            便携版打包脚本
 AGENT_INSTALL.md                     Agent 安装与验证说明
 AI_MATTING.md                        AI 模型、缓存和许可证说明

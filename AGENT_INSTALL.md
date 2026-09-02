@@ -114,7 +114,7 @@ Get-CimInstance Win32_Process |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 ```
 
-Start the preferred Python runtime:
+Start the preferred Python runtime (the `.bat` launchers wrap this step and require `wait_for_server.ps1` to sit beside them in the project root, so do not copy a launcher elsewhere on its own):
 
 ```powershell
 $python = if ($env:SPRITE_VIDEO_LAB_PYTHON) { $env:SPRITE_VIDEO_LAB_PYTHON } else { ".\.venv\Scripts\python.exe" }
