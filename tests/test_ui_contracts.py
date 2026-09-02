@@ -162,17 +162,6 @@ def css_px(value):
     return float(match.group(1)) if match else None
 
 
-def selector_specificity(selector_part):
-    """(ids, classes+attributes+pseudo-classes, elements) for one selector."""
-
-    text = re.sub(r"::?[a-zA-Z-]+(?:\([^)]*\))?", lambda m: " :p " if not m.group(0).startswith("::") else " e ", selector_part)
-    ids = len(re.findall(r"#[\w-]+", text))
-    classes = len(re.findall(r"\.[\w-]+|\[[^\]]*\]|:p", text))
-    stripped = re.sub(r"#[\w-]+|\.[\w-]+|\[[^\]]*\]|:p", " ", text)
-    elements = len(re.findall(r"(?<![\w-])[a-zA-Z][\w-]*", stripped))
-    return (ids, classes, elements)
-
-
 def subject_compound(selector_part):
     return re.split(r"\s*[>+~]\s*|\s+", selector_part.strip())[-1]
 
@@ -343,7 +332,13 @@ class StylesheetContractTests(unittest.TestCase):
 
     def test_mobile_touch_target_override_wins_over_every_smaller_compact_rule(self):
         """Every non-mobile rule that shrinks a touch-target control below 44px is
-        beaten on mobile by a rule of equal-or-higher specificity restoring 44px."""
+        beaten on mobile by a rule for the *same selector* restoring 44px.
+
+        Exact selector match is required: a mobile rule that merely shares a
+        class (e.g. ``.compact-check-grid .checkbox-row`` versus
+        ``.checkbox-row.compact``) matches different elements and cannot cover.
+        An identical selector has identical specificity, so with the mobile
+        block later in the file its declaration wins the cascade."""
 
         mobile_rules = [rule for rule in self.rules if rule[2] == MOBILE_MEDIA]
         undersized = []
@@ -359,21 +354,15 @@ class StylesheetContractTests(unittest.TestCase):
         self.assertTrue(undersized, "expected at least one compact touch-target rule to exist")
         for part, media, min_height in undersized:
             with self.subTest(selector=part, media=media, base_min_height=min_height):
-                specificity = selector_specificity(part)
                 covering = [
-                    (mobile_selector, dict(mobile_declarations).get("min-height"))
+                    dict(mobile_declarations).get("min-height")
                     for mobile_selector, mobile_declarations, _media in mobile_rules
-                    for mobile_part in selector_parts(mobile_selector)
-                    if mobile_part == part
-                    or (
-                        touch_target_classes(mobile_part) & touch_target_classes(part)
-                        and selector_specificity(mobile_part) >= specificity
-                    )
+                    if part in selector_parts(mobile_selector)
                 ]
-                heights = [css_px(value) for _selector, value in covering]
+                heights = [css_px(value) for value in covering]
                 self.assertTrue(
                     any(height is not None and height >= 44 for height in heights),
-                    f"no mobile rule with specificity >= {specificity} restores min-height 44px; found {covering}",
+                    f"no mobile rule for exactly {part!r} restores min-height 44px; found {covering}",
                 )
 
     def test_mobile_icon_and_clear_runtime_controls_are_44px_square(self):
