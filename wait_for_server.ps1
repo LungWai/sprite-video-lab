@@ -19,6 +19,7 @@ $probeHost = switch ($normalizedHost) {
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 $hostForUrl = if ($probeHost.Contains(":")) { "[$probeHost]" } else { $probeHost }
 $uri = "http://${hostForUrl}:$Port/api/app-version"
+$appUrl = "http://${hostForUrl}:$Port/"
 
 do {
     try {
@@ -26,7 +27,7 @@ do {
         if ($response.StatusCode -eq 200) {
             if ($OpenBrowser) {
                 try {
-                    Start-Process -FilePath $uri -ErrorAction Stop
+                    Start-Process -FilePath $appUrl -ErrorAction Stop
                 } catch {
                     Write-Host "Sprite Video Lab is ready, but the browser could not be opened: $($_.Exception.Message)" -ForegroundColor Red
                     exit 1

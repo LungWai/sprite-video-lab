@@ -45,5 +45,6 @@ start "Sprite Video Lab Server" "%PYTHON_EXE%" "%~dp0server.py" --serve --host "
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wait_for_server.ps1" -HostName "%SPRITE_VIDEO_LAB_HOST%" -Port "%SPRITE_VIDEO_LAB_PORT%" -TimeoutSeconds 30 -OpenBrowser
 if errorlevel 1 (
   echo Sprite Video Lab failed to start. Check the server window for details.
+  pause
   exit /b 1
 )

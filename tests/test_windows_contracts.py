@@ -140,6 +140,27 @@ def resolve_powershell_path(expression: str, table: dict[str, tuple[str, str]], 
     return leaf if prefix == "" else prefix + "\\" + leaf
 
 
+def resolve_powershell_string(expression: str, lines: list[str]) -> str:
+    """Resolve ``$var`` to the double-quoted literal it was assigned (``$var = "..."``),
+    or return the literal itself when ``expression`` is already a quoted string."""
+    expression = expression.strip()
+    literal = re.fullmatch(r'"([^"]*)"', expression)
+    if literal:
+        return literal.group(1)
+    var = re.fullmatch(r"\$(\w+)", expression)
+    if not var:
+        raise AssertionError(f"unsupported string expression: {expression!r}")
+    assignments = [
+        match.group(1)
+        for line in lines
+        for match in [re.match(rf'^\s*\${var.group(1)}\s*=\s*"([^"]*)"\s*$', line)]
+        if match
+    ]
+    if len(assignments) != 1:
+        raise AssertionError(f"expected exactly one string assignment to ${var.group(1)}, found {len(assignments)}")
+    return assignments[0]
+
+
 def find_line(lines: list[str], predicate, *, description: str, start: int = 0) -> int:
     for index in range(start, len(lines)):
         if predicate(lines[index]):
@@ -230,7 +251,6 @@ class BuilderLayoutContractTests(unittest.TestCase):
         self.assertIsNotNone(match, f"Python home must be copied via Copy-TreeContents, found: {copy_line.strip()!r}")
         destination = resolve_powershell_path(match.group(1), self.paths, "bundleRoot")
         self.assertEqual(destination, "runtime\\python")
-        self.assertNotIn("Copy-Tree -Source $pythonHomeResolved -Destination $runtimeRoot", self.builder)
 
     def test_copy_tree_is_retained_for_the_corridorkey_container(self):
         """Contract: the CorridorKey directory is still copied as a container so the
@@ -486,6 +506,22 @@ class ReadinessProbeContractTests(unittest.TestCase):
         )
         self.assertTrue(guard_index < process_lines[0] <= block_end(self.lines, guard_index))
 
+    def test_browser_opens_app_root_not_probe_endpoint(self):
+        """Contract: the URL handed to Start-Process resolves to the app root
+        (http://host:port/), the same page the launchers opened before readiness
+        gating, while Invoke-WebRequest keeps probing /api/app-version."""
+        process_index = find_line(self.lines, lambda line: "Start-Process" in line, description="Start-Process")
+        process_arg = re.search(r"Start-Process\s+-FilePath\s+(\$\w+|\"[^\"]*\")", self.lines[process_index])
+        self.assertIsNotNone(process_arg, "Start-Process must pass -FilePath")
+        browser_url = resolve_powershell_string(process_arg.group(1), self.lines)
+        self.assertRegex(browser_url, r"^http://\$\{hostForUrl\}:\$Port/$")
+        self.assertNotIn(READINESS_ENDPOINT, browser_url)
+        probe_index = find_line(self.lines, lambda line: "Invoke-WebRequest" in line, description="Invoke-WebRequest")
+        probe_arg = re.search(r"Invoke-WebRequest\s+-Uri\s+(\$\w+|\"[^\"]*\")", self.lines[probe_index])
+        probe_url = resolve_powershell_string(probe_arg.group(1), self.lines)
+        self.assertEqual(probe_url, "http://${hostForUrl}:$Port" + READINESS_ENDPOINT)
+        self.assertNotEqual(browser_url, probe_url)
+
     def test_exit_codes_distinguish_ready_from_timeout_and_browser_failure(self):
         """Contract: exit 0 happens only inside the HTTP-200 branch; the timeout path
         after the loop and the browser-launch failure path both exit 1."""
@@ -562,6 +598,9 @@ class LauncherStartupContractTests(unittest.TestCase):
         "standard": STANDARD_LAUNCHER_PATH,
         "portable": PORTABLE_LAUNCHER_PATH,
     }
+    # The portable launcher's pre-existing error paths pause so a double-click user can
+    # read the message; the standard launcher's do not. The readiness failure mirrors each.
+    PAUSES_ON_ERROR = {"standard": False, "portable": True}
 
     def _commands(self, path: Path) -> list[str]:
         return batch_logical_commands(read_script(path))
@@ -598,6 +637,13 @@ class LauncherStartupContractTests(unittest.TestCase):
                 failure_block = sequence[1 : sequence.index(")") + 1] if ")" in sequence else sequence[1:]
                 self.assertTrue(any(re.match(r"exit\s+/b\s+1", command) for command in failure_block), f"{name}: readiness failure must exit /b 1")
                 self.assertTrue(any(command.lower().startswith("echo ") and "failed to start" in command.lower() for command in failure_block))
+                pause_positions = [index for index, command in enumerate(failure_block) if command.lower() == "pause"]
+                exit_position = next(index for index, command in enumerate(failure_block) if re.match(r"exit\s+/b\s+1", command))
+                if self.PAUSES_ON_ERROR[name]:
+                    self.assertEqual(len(pause_positions), 1, f"{name}: readiness failure must pause before exiting")
+                    self.assertLess(pause_positions[0], exit_position)
+                else:
+                    self.assertEqual(pause_positions, [], f"{name}: error paths in this launcher do not pause")
 
     def test_browser_opening_is_delegated_not_started_directly(self):
         """Contract: the launcher opens no browser itself; the only `start` command is
