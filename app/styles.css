@@ -2549,7 +2549,13 @@ button:focus-visible,
   select,
   .checkbox-row,
   .magic-realesrgan-option,
-  .magic-resize-option {
+  .magic-resize-option,
+  .ghost-button.tiny,
+  .choice-button.compact,
+  .checkbox-row.compact,
+  .compact-check-grid .checkbox-row,
+  .preview-toolbar .primary-button,
+  .preview-toolbar .primary-button.large {
     min-height: 44px;
   }
 

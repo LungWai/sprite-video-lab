@@ -157,6 +157,37 @@ def declared_value(rules, selector_part, property_name, media=None):
     return value
 
 
+def css_px(value):
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)px", value or "")
+    return float(match.group(1)) if match else None
+
+
+def selector_specificity(selector_part):
+    """(ids, classes+attributes+pseudo-classes, elements) for one selector."""
+
+    text = re.sub(r"::?[a-zA-Z-]+(?:\([^)]*\))?", lambda m: " :p " if not m.group(0).startswith("::") else " e ", selector_part)
+    ids = len(re.findall(r"#[\w-]+", text))
+    classes = len(re.findall(r"\.[\w-]+|\[[^\]]*\]|:p", text))
+    stripped = re.sub(r"#[\w-]+|\.[\w-]+|\[[^\]]*\]|:p", " ", text)
+    elements = len(re.findall(r"(?<![\w-])[a-zA-Z][\w-]*", stripped))
+    return (ids, classes, elements)
+
+
+def subject_compound(selector_part):
+    return re.split(r"\s*[>+~]\s*|\s+", selector_part.strip())[-1]
+
+
+def touch_target_classes(selector_part):
+    """Brief touch-target classes that the selector's subject compound carries."""
+
+    subject = subject_compound(selector_part)
+    return {
+        target
+        for target in TOUCH_TARGET_SELECTORS
+        if target.startswith(".") and re.search(rf"{re.escape(target)}(?![\w-])", subject)
+    }
+
+
 def is_heading_selector(selector):
     return any(re.fullmatch(r"h[1-3]", part) for part in selector_parts(selector))
 
@@ -309,6 +340,41 @@ class StylesheetContractTests(unittest.TestCase):
         for selector in TOUCH_TARGET_SELECTORS:
             with self.subTest(selector=selector):
                 self.assertEqual(declared_value(self.rules, selector, "min-height", media=MOBILE_MEDIA), "44px")
+
+    def test_mobile_touch_target_override_wins_over_every_smaller_compact_rule(self):
+        """Every non-mobile rule that shrinks a touch-target control below 44px is
+        beaten on mobile by a rule of equal-or-higher specificity restoring 44px."""
+
+        mobile_rules = [rule for rule in self.rules if rule[2] == MOBILE_MEDIA]
+        undersized = []
+        for selector, declarations, media in self.rules:
+            if media == MOBILE_MEDIA:
+                continue
+            min_height = css_px(dict(declarations).get("min-height"))
+            if min_height is None or min_height >= 44:
+                continue
+            for part in selector_parts(selector):
+                if touch_target_classes(part):
+                    undersized.append((part, media, min_height))
+        self.assertTrue(undersized, "expected at least one compact touch-target rule to exist")
+        for part, media, min_height in undersized:
+            with self.subTest(selector=part, media=media, base_min_height=min_height):
+                specificity = selector_specificity(part)
+                covering = [
+                    (mobile_selector, dict(mobile_declarations).get("min-height"))
+                    for mobile_selector, mobile_declarations, _media in mobile_rules
+                    for mobile_part in selector_parts(mobile_selector)
+                    if mobile_part == part
+                    or (
+                        touch_target_classes(mobile_part) & touch_target_classes(part)
+                        and selector_specificity(mobile_part) >= specificity
+                    )
+                ]
+                heights = [css_px(value) for _selector, value in covering]
+                self.assertTrue(
+                    any(height is not None and height >= 44 for height in heights),
+                    f"no mobile rule with specificity >= {specificity} restores min-height 44px; found {covering}",
+                )
 
     def test_mobile_icon_and_clear_runtime_controls_are_44px_square(self):
         for selector in (".icon-button", ".clear-runtime-button"):
